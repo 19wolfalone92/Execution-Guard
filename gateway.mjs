@@ -45,6 +45,26 @@ function authorizationCategory(error,stage) {
     default: return "request_rejected";
   }
 }
+const githubTokenEndpoint="https://github.com/login/oauth/access_token";
+const knownGithubErrors=new Set(["incorrect_client_credentials","redirect_uri_mismatch","bad_verification_code","unverified_user_email","invalid_grant","invalid_request","invalid_client","bad_code_verifier","access_denied"]);
+async function exchangeGithubCode(env,code,verifier,fetcher=fetch) {
+  if(typeof verifier!=="string"||!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier))return {error:"invalid_saved_verifier"};
+  if(typeof env.GITHUB_CLIENT_ID!=="string"||!env.GITHUB_CLIENT_ID.trim()||typeof env.GITHUB_CLIENT_SECRET!=="string"||!env.GITHUB_CLIENT_SECRET.trim())return {error:"missing_client_configuration"};
+  const body=new URLSearchParams({client_id:env.GITHUB_CLIENT_ID.trim(),client_secret:env.GITHUB_CLIENT_SECRET.trim(),code,code_verifier:verifier,redirect_uri:callbackUrl});
+  let response;
+  try {
+    response=await fetcher(githubTokenEndpoint,{method:"POST",redirect:"manual",headers:{Accept:"application/json","Content-Type":"application/x-www-form-urlencoded","User-Agent":"Execution-Guard"},body:body.toString(),signal:AbortSignal.timeout(15000)});
+  } catch(error) {
+    return {error:error?.name==="TimeoutError"||error?.name==="AbortError"?"network_timeout":"network_failure"};
+  }
+  if(response.status>=300&&response.status<400)return {error:"unexpected_redirect"};
+  let payload;
+  try {payload=await response.json();} catch {return {error:"non_json_http_"+response.status};}
+  if(typeof payload?.error==="string")return {error:knownGithubErrors.has(payload.error)?payload.error:"github_rejected_http_"+response.status};
+  if(!response.ok)return {error:"http_"+response.status};
+  if(typeof payload?.access_token!=="string"||!payload.access_token||typeof payload.token_type!=="string"||payload.token_type.toLowerCase()!=="bearer")return {error:"invalid_token_response"};
+  return {accessToken:payload.access_token};
+}
 const defaultHandler={async fetch(request,env) {
   const path=new URL(request.url).pathname;
   const oauth=env.OAUTH_PROVIDER;
@@ -93,13 +113,16 @@ const defaultHandler={async fetch(request,env) {
         return new Response("Authorization failed (github_callback / "+reason+")",{status:400,headers});
       }
       stage="github_token_exchange";
-      const token=await fetch("https://github.com/login/oauth/access_token",{method:"POST",redirect:"error",headers:{Accept:"application/json","Content-Type":"application/json"},body:JSON.stringify({client_id:env.GITHUB_CLIENT_ID,client_secret:env.GITHUB_CLIENT_SECRET,code,code_verifier:data.verifier,redirect_uri:callbackUrl})});
-      if(!token.ok)return new Response("Sign in failed",{status:403,headers});
-      const {access_token}=await token.json();
-      if(typeof access_token!=="string"||!access_token)return new Response("Sign in failed",{status:403,headers});
+      const exchange=await exchangeGithubCode(env,code,data?.verifier);
+      if(exchange.error){
+        console.warn(JSON.stringify({event:"oauth_authorization_failed",stage,category:exchange.error}));
+        headers.set("Content-Type","text/plain; charset=utf-8");
+        return new Response("Authorization failed ("+stage+" / "+exchange.error+")",{status:502,headers});
+      }
+      const access_token=exchange.accessToken;
       stage="github_user_lookup";
       const response=await fetch("https://api.github.com/user",{redirect:"error",headers:{Authorization:"Bearer "+access_token,"User-Agent":"Execution-Guard",Accept:"application/vnd.github+json"}});
-      if(!response.ok)return new Response("Sign in failed",{status:403,headers});
+      if(!response.ok)return new Response("Authorization failed (github_user_lookup / http_"+response.status+")",{status:403,headers});
       const user=await response.json();
       if(String(user.id)!==env.EG_OWNER_GITHUB_ID)return new Response("Owner required",{status:403,headers});
       stage="complete_authorization";
