@@ -37,3 +37,5 @@ test('notification accepted without body',async()=>{const r=await invoke({jsonrp
 test('GET MCP rejected',async()=>assert.equal((await read('/mcp')).status,405));
 test('unknown path rejected',async()=>assert.equal((await read('/missing')).status,404));
 test('malformed JSON rejected',async()=>{const r=await worker.fetch(new Request(base+'/mcp',{method:'POST',body:'{' }),env);assert.equal(r.status,400);assert.equal((await r.json()).error.code,-32700)});
+
+test('OAuth binding status does not require reading secrets or KV data',async()=>{const s=await (await read('/',{...env,OAUTH_KV:{get(){throw Error('must not read')}}})).json();assert.equal(s.oauth_storage,'bound');assert.equal((await (await read()).json()).oauth_storage,'not_bound');const c=JSON.parse(readFileSync(new URL('../wrangler.jsonc',import.meta.url),'utf8'));assert.equal(c.kv_namespaces[0].binding,'OAUTH_KV');assert.match(c.kv_namespaces[0].id,/^[a-f0-9]{32}$/)});
