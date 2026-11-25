@@ -28,7 +28,7 @@ const stepSchema = {type:"object",properties:{
 },required:["key","operation"],additionalProperties:false};
 const def = (name,description,properties,required,write=false,destructive=false) => ({
   name, description, inputSchema:{type:"object",properties,required,additionalProperties:false},
-  annotations:{readOnlyHint:!write,destructiveHint:destructive||write,idempotentHint:!write,openWorldHint:false},
+  annotations:{readOnlyHint:!write,destructiveHint:destructive,idempotentHint:!write,openWorldHint:false},
   securitySchemes:[{type:"oauth2",scopes:write?[READ,WRITE]:[READ]}],
   _meta:{securitySchemes:[{type:"oauth2",scopes:write?[READ,WRITE]:[READ]}]}
 });
