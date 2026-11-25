@@ -221,3 +221,63 @@ test("finalization detects a modified persisted result",async()=>{
     assert.equal(final.verified,false);
   }finally{f.close()}
 });
+
+test("exhausted lease reconciles a stranded workflow without another runnable step",async()=>{
+  const f=dbFixture();
+  try{
+    await seedProject(f.db);
+    const w=await workflowCreate(f.db,owner,{project:"williams",name:"exhausted",idempotency_key:"exhausted-lease-1",steps:[{key:"health",operation:"health_probe",input:{},max_attempts:1}]});
+    await workflowStart(f.db,owner,{project:"williams",workflow_id:w.workflow_id});
+    const now=Date.now();
+    f.raw.prepare("UPDATE eg_workflow_steps SET state='RUNNING',attempts=1,lease_id='dead',lease_until=? WHERE workflow_id=?").run(now-1,w.workflow_id);
+    assert.equal((await runWorkflowBatch(f.db,owner,1,fetch,now)).executed,0);
+    const s=await workflowStatus(f.db,owner,{project:"williams",workflow_id:w.workflow_id});
+    assert.equal(s.workflow.state,"FAILED");
+    assert.equal(s.steps[0].state,"FAILED");
+    assert.equal(s.steps[0].attempts,1);
+    assert.equal((await workflowRetry(f.db,owner,{project:"williams",workflow_id:w.workflow_id})).status,"needs_approval");
+  }finally{f.close()}
+});
+test("crash after final step commit reconciles parent on next Cron",async()=>{
+  const f=dbFixture();
+  try{
+    await seedProbe(f.raw);await seedProject(f.db);
+    const w=await workflowCreate(f.db,owner,{project:"williams",name:"parent-recovery",idempotency_key:"parent-recovery-1",steps:[{key:"health",operation:"health_probe",input:{}}]});
+    await workflowStart(f.db,owner,{project:"williams",workflow_id:w.workflow_id});
+    await runWorkflowBatch(f.db,owner,1,fetch,Date.now());
+    f.raw.prepare("UPDATE eg_workflows SET state='RUNNING',finished_at=NULL WHERE id=?").run(w.workflow_id);
+    assert.equal((await runWorkflowBatch(f.db,owner,1,fetch,Date.now())).executed,0);
+    const s=await workflowStatus(f.db,owner,{project:"williams",workflow_id:w.workflow_id});
+    assert.equal(s.workflow.state,"SUCCEEDED");
+    assert.equal(s.steps[0].attempts,1);
+    assert.equal((await executionFinalize(f.db,owner,{project:"williams",workflow_id:w.workflow_id})).verified,true);
+  }finally{f.close()}
+});
+test("expired cancelled lease never requeues a step",async()=>{
+  const f=dbFixture();
+  try{
+    await seedProject(f.db);
+    const w=await workflowCreate(f.db,owner,{project:"williams",name:"cancel-crash",idempotency_key:"cancel-crash-1",steps:[{key:"health",operation:"health_probe",input:{}}]});
+    await workflowStart(f.db,owner,{project:"williams",workflow_id:w.workflow_id});
+    const now=Date.now();
+    f.raw.prepare("UPDATE eg_workflow_steps SET state='RUNNING',attempts=1,lease_id='dead',lease_until=? WHERE workflow_id=?").run(now-1,w.workflow_id);
+    await workflowCancel(f.db,owner,{project:"williams",workflow_id:w.workflow_id});
+    await runWorkflowBatch(f.db,owner,1,fetch,now);
+    const s=await workflowStatus(f.db,owner,{project:"williams",workflow_id:w.workflow_id});
+    assert.equal(s.workflow.state,"CANCELLED");assert.equal(s.steps[0].state,"CANCELLED");assert.equal(s.steps[0].attempts,1);
+  }finally{f.close()}
+});
+test("resume settles already completed last step instead of remaining queued",async()=>{
+  const f=dbFixture();
+  try{
+    await seedProject(f.db);
+    const w=await workflowCreate(f.db,owner,{project:"williams",name:"pause-final",idempotency_key:"pause-final-1",steps:[{key:"repo",operation:"github_repository_status",input:{owner:"octo",repo:"repo"}}]});
+    const args={project:"williams",workflow_id:w.workflow_id};
+    await workflowStart(f.db,owner,args);
+    const fetcher=async()=>{await workflowPause(f.db,owner,args);return new Response(JSON.stringify({id:7,full_name:"octo/repo",default_branch:"main"}),{status:200})};
+    await runWorkflowBatch(f.db,owner,1,fetcher,Date.now());
+    assert.equal((await workflowStatus(f.db,owner,args)).workflow.state,"PAUSED");
+    assert.equal((await workflowResume(f.db,owner,args)).state,"SUCCEEDED");
+    assert.equal((await executionFinalize(f.db,owner,args)).verified,true);
+  }finally{f.close()}
+});

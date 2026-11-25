@@ -36,3 +36,11 @@ If any post-deploy check fails, stop release qualification. Use the configured C
 ## Runtime boundaries
 
 The 0.6.0 candidate uses D1 and the existing Cron Trigger for short bounded steps. It does not provision Cloudflare Queues, Durable Objects or Cloudflare Workflows, and it does not support arbitrary code/shell execution or long-running AI jobs. GitHub access is public read-only in this stage; private repositories and GitHub writes require a separately approved GitHub App integration.
+
+## Release recovery preflight (no production change)
+- The Cloudflare check for `dc6fe17ff0aad2ce50539109a0359b5e7f0c1f78` reports failure, Build ID `51ad3d36-fdb3-4709-ad4e-945951c627bf`. GitHub Actions pass independently. The check has no log text or annotations. Obtain the actual log in the account dashboard or via the authenticated Workers Builds logs API (Workers CI Read); do not guess at root cause.
+- Confirm Preview is isolated from production D1/KV, OAuth secrets, and Cron. Do not run an authenticated Preview against production state. The current hard-coded OAuth issuer/host makes a separate Preview OAuth configuration necessary before full Preview qualification.
+- Before authorized production release: capture deployed Worker version ID, D1 Time Travel bookmark and a private D1 export; verify export by importing into isolated test D1 and comparing legacy rows. Preserve KV namespace and existing secret bindings; do not export OAuth secrets into CI/logs.
+- Deploy only the reviewed SHA after explicit owner approval. Verify old checkpoint and task, candidate health, OAuth owner, refresh and new tools. Run a bounded DAG and compare independent result evidence.
+- Rollback: select the recorded previous Worker version. A code rollback does not restore storage. The new tables are additive, so prefer code rollback, retaining data. Do not use D1 Time Travel restore except after separate approval, since it rewinds user data. Keep D1/KV identifiers unchanged.
+- CI includes an isolated workerd 0.5.0 → candidate → 0.5.0 → candidate restart rehearsal using persisted local D1/KV, not a remote backup, deployment or production OAuth test.

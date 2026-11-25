@@ -269,7 +269,9 @@ export async function workflowResume(db, owner, args) {
   const result=await db.batch(statements);
   if(result[0]?.meta?.changes!==1)return {error:"invalid_state_transition"};
   await audit(db,owner,args.project,"workflow_resumed",{},args.workflow_id);
-  return {status:"resumed",workflow_id:args.workflow_id,state:"QUEUED"};
+  await refreshWorkflowState(db,owner,args.project,args.workflow_id);
+  const resumed=await loadWorkflow(db,owner,args.project,args.workflow_id);
+  return {status:"resumed",workflow_id:args.workflow_id,state:resumed.state};
 }
 
 export async function workflowCancel(db, owner, args) {
@@ -424,8 +426,13 @@ async function refreshWorkflowState(db, owner, project, workflowId) {
 
 export async function runWorkflowBatch(db, owner, limit=4, fetcher=fetch, now=Date.now()) {
   await ensureSchema(db);
-  await db.prepare("UPDATE eg_workflow_steps SET state=CASE WHEN attempts>=max_attempts THEN 'FAILED' ELSE 'RETRYING' END,lease_id=NULL,lease_until=NULL,error_code='lease_expired',available_at=?,updated_at=? WHERE owner=? AND state IN ('RUNNING','VERIFYING') AND lease_until<=?")
+  await db.prepare("UPDATE eg_workflow_steps SET state=CASE WHEN EXISTS(SELECT 1 FROM eg_workflows w WHERE w.id=eg_workflow_steps.workflow_id AND w.state='CANCELLED') THEN 'CANCELLED' WHEN attempts>=max_attempts THEN 'FAILED' WHEN EXISTS(SELECT 1 FROM eg_workflows w WHERE w.id=eg_workflow_steps.workflow_id AND w.state='PAUSED') THEN 'PAUSED' ELSE 'RETRYING' END,lease_id=NULL,lease_until=NULL,error_code='lease_expired',available_at=?,updated_at=? WHERE owner=? AND state IN ('RUNNING','VERIFYING') AND lease_until<=?")
     .bind(now,nowIso(),owner,now).run();
+  // Reconcile terminal child states even when there is no claimable step:
+  // a Worker can stop after the last child is persisted, before parent refresh.
+  const stamp=nowIso();
+  await db.prepare("UPDATE eg_workflows SET state='FAILED',error_code='step_failed',updated_at=?,finished_at=? WHERE owner=? AND state IN ('QUEUED','RUNNING','RETRYING','BLOCKED') AND EXISTS(SELECT 1 FROM eg_workflow_steps s WHERE s.workflow_id=eg_workflows.id AND s.state='FAILED')").bind(stamp,stamp,owner).run();
+  await db.prepare("UPDATE eg_workflows SET state='SUCCEEDED',error_code=NULL,updated_at=?,finished_at=? WHERE owner=? AND state IN ('QUEUED','RUNNING','RETRYING','BLOCKED') AND EXISTS(SELECT 1 FROM eg_workflow_steps s WHERE s.workflow_id=eg_workflows.id) AND NOT EXISTS(SELECT 1 FROM eg_workflow_steps s WHERE s.workflow_id=eg_workflows.id AND (s.state<>'SUCCEEDED' OR COALESCE(CASE WHEN json_valid(s.evidence) THEN json_extract(s.evidence,'$.verified') END,0)<>1))").bind(stamp,stamp,owner).run();
   let executed=0;
   for(let count=0;count<Math.min(limit,8);count++){
     const workflows=await db.prepare("SELECT id,project FROM eg_workflows WHERE owner=? AND state IN ('QUEUED','RUNNING','RETRYING','BLOCKED') ORDER BY created_at LIMIT 50").bind(owner).all();
@@ -455,7 +462,7 @@ export async function runWorkflowBatch(db, owner, limit=4, fetcher=fetch, now=Da
     }
     if(!candidate)break;
     const lease=crypto.randomUUID(),started=nowIso();
-    const claimed=await db.prepare("UPDATE eg_workflow_steps SET state='RUNNING',attempts=attempts+1,lease_id=?,lease_until=?,updated_at=?,error_code=NULL WHERE id=? AND owner=? AND state IN ('QUEUED','RETRYING') AND available_at<=? AND (SELECT COUNT(*) FROM eg_workflow_steps WHERE state='RUNNING' AND lease_until>?)<16 AND (SELECT COUNT(*) FROM eg_workflow_steps WHERE owner=? AND state='RUNNING' AND lease_until>?)<4 RETURNING id,workflow_id,project,step_key,operation,input,depends_on,attempts,max_attempts,timeout_ms")
+    const claimed=await db.prepare("UPDATE eg_workflow_steps SET state='RUNNING',attempts=attempts+1,lease_id=?,lease_until=?,updated_at=?,error_code=NULL WHERE id=? AND owner=? AND state IN ('QUEUED','RETRYING') AND available_at<=? AND attempts<max_attempts AND EXISTS(SELECT 1 FROM eg_workflows w WHERE w.id=eg_workflow_steps.workflow_id AND w.owner=eg_workflow_steps.owner AND w.project=eg_workflow_steps.project AND w.state IN ('QUEUED','RUNNING','RETRYING','BLOCKED')) AND (SELECT COUNT(*) FROM eg_workflow_steps WHERE state IN ('RUNNING','VERIFYING') AND lease_until>?)<16 AND (SELECT COUNT(*) FROM eg_workflow_steps WHERE owner=? AND state IN ('RUNNING','VERIFYING') AND lease_until>?)<4 RETURNING id,workflow_id,project,step_key,operation,input,depends_on,attempts,max_attempts,timeout_ms")
       .bind(lease,now+candidate.step.timeout_ms+30000,started,candidate.step.id,owner,now,now,owner,now).first();
     if(!claimed)continue;
     await db.prepare("UPDATE eg_workflows SET state='RUNNING',updated_at=? WHERE id=? AND owner=? AND state IN ('QUEUED','RETRYING','BLOCKED','RUNNING')").bind(started,claimed.workflow_id,owner).run();

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Miniflare, createFetchMock } from "miniflare";
 
 const config=JSON.parse(readFileSync("wrangler.jsonc","utf8"));
@@ -13,8 +15,11 @@ const owner="123456";
 const upstreamToken="qualification-fake-github-token";
 const mock=createFetchMock();
 mock.disableNetConnect();
-const mf=new Miniflare({
-  modules:true,scriptPath:".oauth-build/"+script[0],
+const candidatePath=".oauth-build/"+script[0];
+const baselinePath=process.env.EG_BASELINE_BUNDLE;
+const persistence=mkdtempSync(join(tmpdir(),"eg-migration-"));
+const options=scriptPath=>({
+  modules:true,scriptPath,kvPersist:join(persistence,"kv"),d1Persist:join(persistence,"d1"),
   // Installed workerd 4.x test binary supports dates through 2026-08-06.
   // This is a test-only cap; production Wrangler configuration is unchanged.
   compatibilityDate:config.compatibility_date>"2026-08-06"?"2026-08-06":config.compatibility_date,
@@ -22,6 +27,8 @@ const mf=new Miniflare({
   bindings:{EG_AUTH_ENABLED:"true",EG_OWNER_GITHUB_ID:owner,GITHUB_CLIENT_ID:"qualification-client",GITHUB_CLIENT_SECRET:"qualification-secret"},
   kvNamespaces:["OAUTH_KV"],d1Databases:["DB"],fetchMock:mock,cf:false
 });
+let mf=new Miniflare(options(baselinePath||candidatePath));
+async function switchWorker(path){await mf.dispose();mf=new Miniflare(options(path));await mf.ready;}
 const testDb=await mf.getD1Database("DB");
 await testDb.exec(readFileSync("probe.sql","utf8"));
 let checks=0;
@@ -122,7 +129,7 @@ try{
   const init=await rpc(tokens.access_token,"initialize",{protocolVersion:"2025-11-25",capabilities:{},clientInfo:{name:"qualification",version:"1"}});
   ok(init.serverInfo.name==="execution-guard-private"&&init.protocolVersion==="2025-11-25","MCP initialize");
   const notification=await call("/mcp-private",{method:"POST",headers:{Authorization:"Bearer "+tokens.access_token,"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})});ok(notification.status===202,"MCP initialized notification");
-  const tools=await rpc(tokens.access_token,"tools/list");ok(["whoami","checkpoint_get","checkpoint_put","task_submit","task_status","task_cancel","project_create","project_get","project_update","project_history","project_resume","workflow_create","workflow_start","workflow_status","workflow_pause","workflow_resume","workflow_cancel","workflow_retry","workflow_dependencies_get","task_evidence_get","github_repository_status","github_commit_status","github_workflow_status","execution_audit","execution_finalize","system_health"].every(x=>tools.tools.some(t=>t.name===x)),"MCP private tools discovered");
+  const legacyTools=await rpc(tokens.access_token,"tools/list");ok(["whoami","checkpoint_get","checkpoint_put","task_submit","task_status","task_cancel"].every(x=>legacyTools.tools.some(t=>t.name===x)),"legacy MCP tools discovered");
   const latestInit=await rpc(tokens.access_token,"initialize",{protocolVersion:"2026-07-28",capabilities:{},clientInfo:{name:"qualification-latest",version:"1"}});ok(latestInit.protocolVersion==="2026-07-28","latest supported MCP protocol version");
   const who=value(await tool(tokens.access_token,"whoami"));ok(who.authenticated&&who.owner_verified&&who.scopes.includes("eg:write"),"authenticated owner and scope");
   const saved=value(await tool(tokens.access_token,"checkpoint_put",{project:"qualification",expected_revision:0,value:"proof"}));ok(saved.status==="saved"&&saved.revision===1,"D1 checkpoint write");
@@ -134,6 +141,18 @@ try{
   let final;
   for(let i=0;i<50;i++){final=value(await tool(tokens.access_token,"task_status",{project:"qualification",task_id:queued.task_id}));if(final.state==="succeeded")break;await new Promise(resolve=>setTimeout(resolve,100));}
 ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task completed and result verified");
+  if(baselinePath){
+    ok(init.serverInfo.version==="0.5.0","migration starts on exact 0.5.0 baseline bundle");
+    await switchWorker(candidatePath);
+    const upgraded=await rpc(tokens.access_token,"initialize",{protocolVersion:"2025-11-25",capabilities:{},clientInfo:{name:"migration",version:"1"}});
+    ok(upgraded.serverInfo.version==="0.6.0","candidate loaded after real workerd restart");
+    const preserved=value(await tool(tokens.access_token,"checkpoint_get",{project:"qualification"}));
+    ok(preserved.found&&preserved.value==="proof"&&preserved.revision===1,"legacy checkpoint and OAuth session survive upgrade");
+    const oldTask=value(await tool(tokens.access_token,"task_status",{project:"qualification",task_id:queued.task_id}));
+    ok(oldTask.state==="succeeded"&&oldTask.result.verified===true,"legacy task survives upgrade");
+  }
+  const tools=await rpc(tokens.access_token,"tools/list");ok(["whoami","checkpoint_get","checkpoint_put","task_submit","task_status","task_cancel","project_create","project_get","project_update","project_history","project_resume","workflow_create","workflow_start","workflow_status","workflow_pause","workflow_resume","workflow_cancel","workflow_retry","workflow_dependencies_get","task_evidence_get","github_repository_status","github_commit_status","github_workflow_status","execution_audit","execution_finalize","system_health"].every(x=>tools.tools.some(t=>t.name===x)),"MCP private tools discovered");
+
   const projectCreated=value(await tool(tokens.access_token,"project_create",{project:"workflow-qualification",record:{goal:"Exercise project memory and DAG orchestration in workerd",rules:["Owner-scoped","No secrets"],repository:{owner:"octo",repo:"repo"},stage:"initial"}}));
   ok(projectCreated.status==="created"&&projectCreated.revision===1,"structured project memory created");
   const projectRead=value(await tool(tokens.access_token,"project_get",{project:"workflow-qualification"}));
@@ -200,9 +219,19 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
   const blocked=await tool(readTokens.access_token,"checkpoint_put",{project:"qualification",expected_revision:1,value:"forbidden"});
   ok(blocked.isError===true,"read-only scope cannot write");
   const unchanged=value(await tool(readTokens.access_token,"checkpoint_get",{project:"qualification"}));ok(unchanged.value==="proof"&&unchanged.revision===1,"scope denial leaves data unchanged");
+  if(baselinePath){
+    await switchWorker(baselinePath);
+    const rolled=await rpc(readTokens.access_token,"initialize",{protocolVersion:"2025-11-25",capabilities:{},clientInfo:{name:"rollback",version:"1"}});
+    ok(rolled.serverInfo.version==="0.5.0","rollback loads original Worker");
+    ok(value(await tool(readTokens.access_token,"checkpoint_get",{project:"qualification"})).value==="proof","legacy read and OAuth session survive rollback");
+    ok(value(await tool(readTokens.access_token,"task_status",{project:"qualification",task_id:queued.task_id})).result.verified===true,"legacy task survives rollback");
+    await switchWorker(candidatePath);
+    const restored=value(await tool(readTokens.access_token,"execution_finalize",{project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id}));
+    ok(restored.verified===true,"candidate evidence survives rollback and re-upgrade");
+  }
   mock.assertNoPendingInterceptors();
   console.log("QUALIFICATION PASS: "+checks+" assertions; actual workerd and OAuth library; simulated GitHub only.");
-}finally{await mf.dispose();await mock.close();}
+}finally{await mf.dispose();await mock.close();rmSync(persistence,{recursive:true,force:true});}
 
 /* Independent production smoke, read-only, no OAuth secrets or issued tokens. */
 try {
