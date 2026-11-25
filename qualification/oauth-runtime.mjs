@@ -247,7 +247,9 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
   ok(blocked.isError===true,"read-only scope cannot write");
   const unchanged=value(await tool(readTokens.access_token,"checkpoint_get",{project:"qualification"}));ok(unchanged.value==="proof"&&unchanged.revision===1,"scope denial leaves data unchanged");
   const allTools=(await rpc(readTokens.access_token,"tools/list")).tools;
-  ok(allTools.length===25&&new Set(allTools.map(t=>t.name)).size===25,"exactly 25 unique MCP tools");
+  const expectedTools=["task_submit","task_status","task_cancel","whoami","checkpoint_get","checkpoint_put","project_create","project_get","project_update","project_history","project_resume","workflow_create","workflow_start","workflow_status","workflow_pause","workflow_resume","workflow_cancel","workflow_retry","workflow_dependencies_get","task_evidence_get","github_repository_status","github_commit_status","github_workflow_status","execution_audit","execution_finalize","system_health"];
+  ok(allTools.length===expectedTools.length&&new Set(allTools.map(t=>t.name)).size===expectedTools.length&&expectedTools.every(n=>allTools.some(t=>t.name===n)),"exactly "+expectedTools.length+" unique MCP tools with unchanged names");
+  console.log("MCP TOOL INVENTORY "+JSON.stringify(allTools.map(t=>t.name)));
   for(const t of allTools){
     ok(t.inputSchema.type==="object"&&t.inputSchema.additionalProperties===false&&Array.isArray(t.inputSchema.required)&&t.securitySchemes?.[0]?.scopes?.includes("eg:read"),"tool schema and read scope: "+t.name);
     const raw=await call("/mcp-private",{method:"POST",headers:{Authorization:"Bearer "+readTokens.access_token,"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1000,method:"tools/call",params:{name:t.name,arguments:{unexpected:true}}})});
