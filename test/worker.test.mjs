@@ -22,12 +22,12 @@ before(() => {
 });
 after(()=>{db?.close(); if(dir)rmSync(dir,{recursive:true,force:true})});
 test('configuration preserves production binding and worker name',()=>{const c=JSON.parse(readFileSync(new URL('../wrangler.jsonc',import.meta.url),'utf8'));assert.equal(c.name,'execution-guard');assert.equal(c.main,'gateway.mjs');assert.equal(c.d1_databases[0].binding,'DB');assert.equal(c.d1_databases[0].database_id,'e7699170-b634-48ce-a3b0-733aedb9b898')});
-test('status reads durable SQLite probe after reopen',async()=>{const r=await read();assert.equal(r.status,200);const s=await r.json();assert.equal(s.version,'0.4.0');assert.equal(s.database,'online');assert.equal(s.persistence_probe,'verified');assert.ok(Number.isFinite(Date.parse(s.timestamp)))});
+test('status reads durable SQLite probe after reopen',async()=>{const r=await read();assert.equal(r.status,200);const s=await r.json();assert.equal(s.version,'0.5.0');assert.equal(s.database,'online');assert.equal(s.persistence_probe,'verified');assert.ok(Number.isFinite(Date.parse(s.timestamp)))});
 test('health endpoint',async()=>assert.equal((await (await read('/health')).json()).persistence_probe,'verified'));
 test('missing database',async()=>assert.equal((await (await read('/',{})).json()).database,'not_verified'));
 test('database failure',async()=>assert.equal((await (await read('/',{DB:{prepare(){throw Error('secret')}}})).json()).database,'not_verified'));
 test('missing probe schema',async()=>{const e={DB:{prepare(s){return {async first(){if(s.includes('eg_probe'))throw Error('missing');return {ok:1}}}}}};const s=await (await read('/',e)).json();assert.equal(s.database,'online');assert.equal(s.persistence_probe,'not_verified')});
-test('initialize negotiates protocol',async()=>{const r=await (await invoke(rpc('initialize',{protocolVersion:'2025-06-18'}))).json();assert.equal(r.result.protocolVersion,'2025-06-18');assert.equal(r.result.serverInfo.version,'0.4.0')});
+test('initialize negotiates protocol',async()=>{const r=await (await invoke(rpc('initialize',{protocolVersion:'2025-06-18'}))).json();assert.equal(r.result.protocolVersion,'2025-06-18');assert.equal(r.result.serverInfo.version,'0.5.0')});
 test('tools list exposes only read-only status',async()=>{const r=await (await invoke(rpc('tools/list'))).json();assert.equal(r.result.tools.length,1);assert.equal(r.result.tools[0].name,'server_status');assert.equal(r.result.tools[0].annotations.readOnlyHint,true)});
 test('MCP call reads actual probe',async()=>{const r=await (await invoke(rpc('tools/call',{name:'server_status',arguments:{}}))).json();assert.equal(JSON.parse(r.result.content[0].text).persistence_probe,'verified')});
 test('arbitrary SQL tool is rejected',async()=>assert.equal((await (await invoke(rpc('tools/call',{name:'sql',arguments:{sql:'DROP TABLE eg_probe'}}))).json()).error.code,-32602));

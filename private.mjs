@@ -1,4 +1,5 @@
 import { isOwner, READ, WRITE, HOST } from "./security.mjs";
+import { taskSubmit, taskStatus, taskCancel } from "./tasks.mjs";
 
 const projectPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const ddl = "CREATE TABLE IF NOT EXISTS eg_checkpoints (owner TEXT NOT NULL, project TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), value TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner, project))";
@@ -9,7 +10,11 @@ const def = (name,description,properties,required,write=false) => ({
   _meta:{securitySchemes:[{type:"oauth2",scopes:write?[READ,WRITE]:[READ]}]}
 });
 const project={type:"string",pattern:"^[a-z0-9][a-z0-9_-]{0,63}$"};
+const taskId={type:"string",pattern:"^[a-f0-9-]{36}$"};
 const tools=[
+  def("task_submit","Queue a bounded health probe or SHA-256 verification for the server scheduler. No arbitrary commands or external writes.",{project,idempotency_key:{type:"string",pattern:"^[a-zA-Z0-9_-]{8,64}$"},kind:{type:"string",enum:["health_probe","sha256_verify"]},payload:{type:"object",description:"Use {} for health_probe; use {text, expected_sha256} for sha256_verify.",properties:{text:{type:"string",maxLength:4096},expected_sha256:{type:"string",pattern:"^[a-f0-9]{64}$"}},additionalProperties:false}},["project","idempotency_key","kind","payload"],true),
+  def("task_status","Read persisted task state and verification evidence.",{project,task_id:taskId},["project","task_id"]),
+  def("task_cancel","Cancel a queued task; running and terminal tasks are not changed.",{project,task_id:taskId},["project","task_id"],true),
   def("whoami","Verify authenticated owner identity and granted checkpoint scopes.",{},[]),
   def("checkpoint_get","Read a single project checkpoint and its revision.",{project},["project"]),
   def("checkpoint_put","Create or replace a project checkpoint using an expected revision. Never store passwords, credentials or private keys.",{project,expected_revision:{type:"integer",minimum:0,maximum:2147483646},value:{type:"string",maxLength:8192}},["project","expected_revision","value"],true)
@@ -34,12 +39,16 @@ export async function privateFetch(request,env,ctx) {
   const reply=result=>json({jsonrpc:"2.0",id:m.id,result});
   const rpcError=(code,message)=>json({jsonrpc:"2.0",id:m.id,error:{code,message}});
   const result=(value,isError=false)=>reply({content:[{type:"text",text:JSON.stringify(value)}],...(isError?{isError:true}:{})});
-  if(m.method==="initialize"){const versions=["2025-03-26","2025-06-18","2025-11-25","2026-07-28"];const v=m.params?.protocolVersion;return reply({protocolVersion:versions.includes(v)?v:"2025-11-25",capabilities:{tools:{}},serverInfo:{name:"execution-guard-private",version:"0.4.0"}});}
+  if(m.method==="initialize"){const versions=["2025-03-26","2025-06-18","2025-11-25","2026-07-28"];const v=m.params?.protocolVersion;return reply({protocolVersion:versions.includes(v)?v:"2025-11-25",capabilities:{tools:{}},serverInfo:{name:"execution-guard-private",version:"0.5.0"}});}
   if(m.method==="ping")return reply({});
   if(m.method==="tools/list")return reply({tools});
   if(m.method!=="tools/call")return rpcError(-32601,"Method not found");
   const name=m.params?.name,args=m.params?.arguments??{},owner=ctx.props.userId;
   if(name==="whoami"){if(!validArgs(args,[]))return rpcError(-32602,"Invalid arguments");return result({authenticated:true,owner_verified:true,scopes:ctx.auth.scope});}
+  if(["task_submit","task_status","task_cancel"].includes(name)){
+    if(name!=="task_status"&&!ctx.auth.scope.includes(WRITE))return reply({isError:true,content:[{type:"text",text:"Write scope required"}],_meta:{"mcp/www_authenticate":[`Bearer resource_metadata="${HOST}/.well-known/oauth-protected-resource/mcp-private", error="insufficient_scope", error_description="Task write scope required", scope="${READ} ${WRITE}"`]}});
+    try{const fn={task_submit:taskSubmit,task_status:taskStatus,task_cancel:taskCancel}[name];const r=await fn(env.DB,owner,args);return result(r,!!r.error);}catch{return result({error:"storage_error"},true);}
+  }
   if(!["checkpoint_get","checkpoint_put"].includes(name))return rpcError(-32602,"Unknown tool");
   const write=name==="checkpoint_put";
   if(write&&!ctx.auth.scope.includes(WRITE))return reply({isError:true,content:[{type:"text",text:"Write scope required"}],_meta:{"mcp/www_authenticate":[`Bearer resource_metadata="${HOST}/.well-known/oauth-protected-resource/mcp-private", error="insufficient_scope", error_description="Checkpoint write scope required", scope="${READ} ${WRITE}"`]}});

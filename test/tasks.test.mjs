@@ -1,0 +1,30 @@
+import {test} from "node:test";
+import assert from "node:assert/strict";
+import {DatabaseSync} from "node:sqlite";
+import {taskSubmit,taskStatus,taskCancel,runNextTask} from "../tasks.mjs";
+const owner="7",project="eg",expected="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+const shaArgs=(key,hash=expected)=>({project,idempotency_key:key,kind:"sha256_verify",payload:{text:"abc",expected_sha256:hash}});
+function dbFixture(){
+  const db=new DatabaseSync(":memory:");
+  const adapter={prepare(sql){const stmt=db.prepare(sql);const wrap=a=>({bind:(...v)=>wrap(v),first:async()=>stmt.get(...a),run:async()=>({meta:{changes:Number(stmt.run(...a).changes)}})});return wrap([])}};
+  return {db,adapter};
+}
+test("queue persists outcome and verifies SHA-256",async()=>{const {db,adapter:d}=dbFixture();try{const a=await taskSubmit(d,owner,shaArgs("unique01"),1000);assert.equal(a.state,"queued");assert.equal((await taskSubmit(d,owner,shaArgs("unique01"),1000)).deduplicated,true);assert.equal((await taskSubmit(d,owner,shaArgs("unique01","0".repeat(64)),1000)).error,"idempotency_conflict");assert.equal((await runNextTask(d,owner,1000)).committed,true);const s=await taskStatus(d,owner,{project,task_id:a.task_id});assert.equal(s.state,"succeeded");assert.equal(s.result.verified,true);assert.equal(s.attempts,1);assert.equal((await taskStatus(d,"8",{project,task_id:a.task_id})).found,false);assert.equal((await taskStatus(d,owner,{project:"other",task_id:a.task_id})).found,false);}finally{db.close()}});
+test("verification mismatch fails rather than reporting success",async()=>{const {db,adapter:d}=dbFixture();try{const a=await taskSubmit(d,owner,shaArgs("unique02","0".repeat(64)),1000);await runNextTask(d,owner,1000);const s=await taskStatus(d,owner,{project,task_id:a.task_id});assert.equal(s.state,"failed");assert.equal(s.error_code,"verification_mismatch");assert.equal(s.result.verified,false)}finally{db.close()}});
+test("cancel only queued and invalid job rejected",async()=>{const {db,adapter:d}=dbFixture();try{assert.equal((await taskSubmit(d,owner,{...shaArgs("unique03"),kind:"shell"},1000)).error,"invalid_kind_or_payload");const a=await taskSubmit(d,owner,shaArgs("unique03"),1000);assert.equal((await taskCancel(d,owner,{project,task_id:a.task_id})).state,"cancelled");assert.equal((await runNextTask(d,owner,1000)).claimed,false);assert.equal((await taskCancel(d,owner,{project,task_id:a.task_id})).cancelled_now,false)}finally{db.close()}});
+test("bounded retries and final failure on missing probe",async()=>{const {db,adapter:d}=dbFixture();try{const a=await taskSubmit(d,owner,{project,idempotency_key:"unique04",kind:"health_probe",payload:{}},1000);await runNextTask(d,owner,1000);assert.equal((await taskStatus(d,owner,{project,task_id:a.task_id})).state,"queued");assert.equal((await runNextTask(d,owner,1001)).claimed,false);await runNextTask(d,owner,61000);await runNextTask(d,owner,181000);const s=await taskStatus(d,owner,{project,task_id:a.task_id});assert.equal(s.state,"failed");assert.equal(s.attempts,3)}finally{db.close()}});
+test("expired lease recovery and concurrent claim without duplicate execution",async()=>{const {db,adapter:d}=dbFixture();try{const a=await taskSubmit(d,owner,shaArgs("unique05"),1000);db.prepare("UPDATE eg_tasks SET state='running',attempts=1,lease_id='old',lease_until=1001 WHERE id=?").run(a.task_id);assert.equal((await runNextTask(d,owner,1000)).claimed,false);const r=await Promise.all([runNextTask(d,owner,1002),runNextTask(d,owner,1002)]);assert.equal(r.filter(x=>x.claimed).length,1);const s=await taskStatus(d,owner,{project,task_id:a.task_id});assert.equal(s.state,"succeeded");assert.equal(s.attempts,2)}finally{db.close()}});
+test("health probe actually checks storage",async()=>{const {db,adapter:d}=dbFixture();try{db.exec("CREATE TABLE eg_probe(id INTEGER PRIMARY KEY,value TEXT);INSERT INTO eg_probe VALUES(1,'execution-guard-v030')");const a=await taskSubmit(d,owner,{project,idempotency_key:"unique06",kind:"health_probe",payload:{}},1000);await runNextTask(d,owner,1000);const s=await taskStatus(d,owner,{project,task_id:a.task_id});assert.equal(s.state,"succeeded");assert.equal(s.result.persistence_probe,"verified")}finally{db.close()}});
+
+test("MCP task tools enforce owner and write scope",async()=>{
+  const {privateFetch}=await import("../private.mjs");const {HOST,READ,WRITE}=await import("../security.mjs");
+  const {db,adapter:d}=dbFixture();const env={EG_AUTH_ENABLED:"true",EG_OWNER_GITHUB_ID:owner,GITHUB_CLIENT_ID:"test",GITHUB_CLIENT_SECRET:"fake",OAUTH_KV:{},DB:d};
+  const ctx=scope=>({props:{userId:owner},auth:{scope}});
+  const request=(name,args)=>new Request(HOST+"/mcp-private",{method:"POST",body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:args}})});
+  try{
+    const denied=await privateFetch(request("task_submit",shaArgs("unique07")),env,ctx([READ]));assert.equal((await denied.json()).result.isError,true);
+    const submitted=await privateFetch(request("task_submit",shaArgs("unique07")),env,ctx([READ,WRITE]));const a=JSON.parse((await submitted.json()).result.content[0].text);assert.equal(a.state,"queued");
+    const status=await privateFetch(request("task_status",{project,task_id:a.task_id}),env,ctx([READ]));assert.equal(JSON.parse((await status.json()).result.content[0].text).task_id,a.task_id);
+    assert.equal((await privateFetch(request("task_status",{project,task_id:a.task_id}),env,{props:{userId:"other"},auth:{scope:[READ]}})).status,403);
+  }finally{db.close()}
+});

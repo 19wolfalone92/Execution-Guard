@@ -13,5 +13,10 @@
   "compatibility_flags": [
     "global_fetch_strictly_public",
     "nodejs_compat"
-  ]
+  ],
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  }
 }
