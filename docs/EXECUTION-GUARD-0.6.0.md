@@ -15,7 +15,7 @@
 
 ### Durable DAG workflows
 
-- `workflow_create` accepts 1–32 bounded steps and validates unique keys, references and cycles before persistence.
+- `workflow_create` requires an owner-supplied idempotency key; reusing it with the same definition returns the existing workflow, while a different definition is rejected. It accepts 1–32 bounded steps and validates unique keys, references and cycles before persistence.
 - Steps declare dependencies, a supported operation, maximum attempts (1–5) and timeout (1–30 seconds).
 - A step becomes runnable only after all dependencies are verified as `SUCCEEDED`.
 - The state model includes CREATED, QUEUED, BLOCKED, RUNNING, RETRYING, VERIFYING, SUCCEEDED, FAILED, CANCELLED, PAUSED and NEEDS_APPROVAL.
