@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 const projectPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const workflowIdPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const stepKeyPattern = /^[a-z0-9][a-z0-9_-]{0,31}$/;
-const repoPartPattern = /^[A-Za-z0-9_.-]{1,100}$/;
+const repoPartPattern = /^(?!\\.{1,2}$)[A-Za-z0-9_.-]{1,100}$/;
 const shaPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const secretKeyPattern = /(?:token|secret|password|credential|private.?key|authorization|cookie)/i;
 const projectFields = new Set(["goal","rules","repository","branch","commit","pull_request","stage","completed","pending","errors","tests","limitations","next_action","evidence"]);
@@ -274,7 +274,7 @@ export async function workflowRetry(db, owner, args) {
     return {status:"needs_approval",workflow_id:args.workflow_id,reason:"attempt_limit_reached"};
   }
   const now=nowIso(),statements=[db.prepare("UPDATE eg_workflows SET state='QUEUED',updated_at=?,finished_at=NULL,error_code=NULL WHERE owner=? AND project=? AND id=? AND state IN ('FAILED','NEEDS_APPROVAL')").bind(now,owner,args.project,args.workflow_id)];
-  for(const step of failed)statements.push(db.prepare("UPDATE eg_workflow_steps SET state='QUEUED',attempts=0,available_at=0,lease_id=NULL,lease_until=NULL,error_code=NULL,updated_at=? WHERE owner=? AND project=? AND workflow_id=? AND step_key=? AND state='FAILED' AND EXISTS(SELECT 1 FROM eg_workflows WHERE id=? AND state='QUEUED')").bind(now,owner,args.project,args.workflow_id,step.step_key,args.workflow_id));
+  for(const step of failed)statements.push(db.prepare("UPDATE eg_workflow_steps SET state='QUEUED',attempts=CASE WHEN ?=1 THEN 0 ELSE attempts END,available_at=0,lease_id=NULL,lease_until=NULL,error_code=NULL,updated_at=? WHERE owner=? AND project=? AND workflow_id=? AND step_key=? AND state='FAILED' AND EXISTS(SELECT 1 FROM eg_workflows WHERE id=? AND state='QUEUED')").bind(workflow.state==="NEEDS_APPROVAL"?1:0,now,owner,args.project,args.workflow_id,step.step_key,args.workflow_id));
   const result=await db.batch(statements);
   if(result[0]?.meta?.changes!==1)return {error:"invalid_state_transition"};
   await audit(db,owner,args.project,"workflow_retry_approved",{steps:failed.map(x=>x.step_key)},args.workflow_id);
@@ -302,7 +302,7 @@ export async function systemHealth(db, owner) {
     const tasks=await db.prepare("SELECT COUNT(*) AS count FROM eg_tasks WHERE owner=?").bind(owner).first().catch(()=>({count:0}));
     const projects=await db.prepare("SELECT COUNT(*) AS count FROM eg_projects WHERE owner=?").bind(owner).first();
     const workflows=await db.prepare("SELECT COUNT(*) AS count FROM eg_workflows WHERE owner=?").bind(owner).first();
-    return {status:"online",database:"online",persistence_probe:probe?.value==="execution-guard-v030"?"verified":"not_verified",projects:projects?.count??0,workflows:workflows?.count??0,tasks:tasks?.count??0};
+    return {status:probe?.value==="execution-guard-v030"?"online":"degraded",database:"online",persistence_probe:probe?.value==="execution-guard-v030"?"verified":"not_verified",projects:projects?.count??0,workflows:workflows?.count??0,tasks:tasks?.count??0};
   } catch { return {status:"degraded",database:"not_verified"}; }
 }
 
@@ -436,6 +436,13 @@ export async function runWorkflowBatch(db, owner, limit=4, fetcher=fetch, now=Da
     let result=null,transient=false,errorCode=null,delay=0;
     try { result=await executeOperation(db,claimed.operation,parseJson(claimed.input,{}),claimed.timeout_ms,fetcher); }
     catch(error) { transient=error instanceof RetryableError;errorCode=error.code||error.message||"execution_error";delay=error.delayMs||0; }
+    const workflowAfterExecution=await loadWorkflow(db,owner,claimed.project,claimed.workflow_id);
+    if(workflowAfterExecution?.state==="CANCELLED"){
+      await db.prepare("UPDATE eg_workflow_steps SET state='CANCELLED',result=?,lease_id=NULL,lease_until=NULL,updated_at=? WHERE id=? AND owner=? AND lease_id=? AND state='RUNNING'")
+        .bind(result?JSON.stringify(result):null,nowIso(),claimed.id,owner,lease).run();
+      executed++;
+      continue;
+    }
     if(transient && claimed.attempts<claimed.max_attempts){
       const backoff=Math.min(3600000,1000*Math.pow(2,claimed.attempts-1));
       const jitter=Math.floor(Math.random()*1000);
