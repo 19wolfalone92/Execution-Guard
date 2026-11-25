@@ -1,3 +1,5 @@
+import { runWorkflowBatch } from "./orchestrator.mjs";
+
 // Durable queue for explicitly allowed, deterministic operations only.
 export const MAX_ATTEMPTS=3;
 const leaseMs=120000;
@@ -58,7 +60,6 @@ async function execute(db,row){
 }
 export async function runNextTask(db,owner,now=Date.now()){
   if(!await exists(db))return {claimed:false};
-  // Expired leases cannot be completed by an earlier worker, because every completion checks the lease ID.
   await db.prepare("UPDATE eg_tasks SET state='failed',lease_id=NULL,lease_until=NULL,error_code='lease_attempts_exhausted',updated_at=? WHERE owner=? AND state='running' AND lease_until<=? AND attempts>=?").bind(now,owner,now,MAX_ATTEMPTS).run();
   const lease=crypto.randomUUID();
   const row=await db.prepare("UPDATE eg_tasks SET state='running',attempts=attempts+1,lease_id=?,lease_until=?,updated_at=?,error_code=NULL WHERE id=(SELECT id FROM eg_tasks WHERE owner=? AND attempts<? AND ((state='queued' AND available_at<=?) OR (state='running' AND lease_until<=?)) ORDER BY created_at,id LIMIT 1) RETURNING id,kind,payload,attempts").bind(lease,now+leaseMs,now,owner,MAX_ATTEMPTS,now,now).first();
@@ -74,4 +75,5 @@ export async function runNextTask(db,owner,now=Date.now()){
 }
 export async function runBatch(db,owner,limit=4){
   for(let i=0;i<Math.min(limit,4);i++){const r=await runNextTask(db,owner);if(!r.claimed)break;}
+  await runWorkflowBatch(db,owner,limit);
 }
