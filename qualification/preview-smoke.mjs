@@ -6,17 +6,18 @@ const repo="19wolfalone92/Execution-Guard",sha=process.env.GITHUB_SHA;
 assert.match(sha||"",/^[a-f0-9]{40}$/);
 const api=async p=>{const r=await fetch("https://api.github.com/repos/"+repo+p,{headers:{Authorization:"Bearer "+process.env.GITHUB_TOKEN,Accept:"application/vnd.github+json","User-Agent":"eg-preview-qualification"},signal:AbortSignal.timeout(15000)});assert.equal(r.status,200);return r.json();};
 let deployment,build;
-for(let i=0;i<36;i++){
+for(let i=0;i<60;i++){
   const checks=await api("/commits/"+sha+"/check-runs");build=checks.check_runs.find(x=>x.name==="Workers Builds: execution-guard");
   if(build?.status==="completed"&&build.conclusion!=="success")assert.fail("Cloudflare build failed: "+build.details_url);
   const comments=await api("/issues/5/comments?per_page=100");
-  for(const c of comments.filter(x=>x.user?.login==="cloudflare-workers-and-pages[bot]")){
+  for(const c of comments.filter(x=>["cloudflare-workers-and-pages[bot]","cloudflare-workers-and-pages"].includes(x.user?.login))){
     for(const row of c.body.match(/<tr>[\s\S]*?<\/tr>/g)||[]){
       if(row.includes("<td>"+sha.slice(0,7)+"</td>")&&row.includes("Deployment:</b> Success")){
         deployment=row.match(/https:\/\/[a-f0-9]{8}-execution-guard\.19wolf-alone92\.workers\.dev/)?.[0];
       }
     }
   }
+  if(i%6===0)console.log("Preview discovery: "+JSON.stringify({sha,attempt:i+1,build:build?.status??"missing",conclusion:build?.conclusion??null,matchingDeployment:Boolean(deployment)}));
   if(deployment&&build?.conclusion==="success")break;
   await new Promise(r=>setTimeout(r,10000));
 }
@@ -49,6 +50,7 @@ else{
   const stable="https://audit-oauth-e2e-20261125-execution-guard.19wolf-alone92.workers.dev";
   const r=await fetch(stable+"/health",{redirect:"manual",signal:AbortSignal.timeout(15000)});
   assert.equal(r.status,200);const state=await r.json();
+  console.log("STABLE PREVIEW HEALTH "+JSON.stringify(state));
   assert.equal(state.version,"0.6.0");assert.equal(state.database,"online");assert.equal(state.persistence_probe,"verified");assert.equal(state.oauth_storage,"bound");assert.equal(state.oauth.discovery,"verified");
   const unauthorized=await fetch(stable+"/mcp-private",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"}),redirect:"manual",signal:AbortSignal.timeout(15000)});
   assert.equal(unauthorized.status,401);assert.match(unauthorized.headers.get("WWW-Authenticate")||"",/resource_metadata=/);

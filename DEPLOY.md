@@ -65,3 +65,6 @@ The 26-tool inventory (six original plus 20 additional; earlier count of 25 was 
 
 ### Staged dedicated resources (owner supplied IDs)
 The owner supplied test D1 657131f8-b0f4-47f3-ab3d-91840843f2db and test KV 25a30c61f53b422fa11889babb147fd4 and reported completion of the separate Preview secrets setup. Both IDs differ from the production bindings. Stage these in Wrangler under previews only, with EG_AUTH_ENABLED=false and EG_PREVIEW_READY=false. The live HTTP gate checks binding presence and fail-closed behavior, not actual resource identity or authenticated integration. Do not enable private Preview until owner verifies actual deployed binding targets and seeds the two test markers. Production settings are unchanged. The account remains inaccessible to this chat; no remote SQL or KV writes are claimed.
+
+### Owner-confirmed marker initialization
+Owner reports dedicated D1 and KV marker initialization complete. Enable only the Preview flags; the existing runtime guard still requires both markers and complete OAuth bindings before private access. Live exact-SHA HTTP qualification is required; owner confirmation is not independent runtime proof. The previous staged deployment succeeded but its CI discovery timed out, so increase the bounded discovery window and record status diagnostics. No production changes.

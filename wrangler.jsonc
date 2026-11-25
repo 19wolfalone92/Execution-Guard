@@ -27,9 +27,9 @@
   ],
   "previews": {
     "vars": {
-      "EG_AUTH_ENABLED": "false",
+      "EG_AUTH_ENABLED": "true",
       "EG_ENVIRONMENT": "preview",
-      "EG_PREVIEW_READY": "false"
+      "EG_PREVIEW_READY": "true"
     },
     "d1_databases": [
       {
