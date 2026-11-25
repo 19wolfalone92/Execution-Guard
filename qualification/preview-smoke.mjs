@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {readFileSync,writeFileSync} from "node:fs";
 import {spawnSync} from "node:child_process";
+import {createHash} from "node:crypto";
 const repo="19wolfalone92/Execution-Guard",branch="audit/oauth-e2e-20261125",sha=process.env.GITHUB_SHA,account=process.env.CLOUDFLARE_ACCOUNT_ID,management=process.env.CLOUDFLARE_MANAGEMENT_TOKEN,read=process.env.CLOUDFLARE_API_TOKEN,tick=process.env.EG_PREVIEW_TICK_SECRET;
 const host="https://audit-oauth-e2e-20261125-execution-guard.19wolf-alone92.workers.dev";
 const out={sha,checks:{},automatic_build:null};
@@ -12,11 +13,28 @@ const cf=async(path,token=read)=>{const x=await get("https://api.cloudflare.com/
 const prod=async()=>{const x=await cf("/workers/scripts/execution-guard/deployments");assert.ok(x.ok);return x.result.deployments.slice(0,1).map(d=>({id:d.id,versions:d.versions.map(v=>({id:v.version_id,percentage:v.percentage}))}));};
 const config=JSON.parse(readFileSync("wrangler.jsonc","utf8"));
 let before;
+const proof="eg-qualification-browser-a34bbee1-4df0-4938-9f42-7c8751e44f50-p",project=proof.slice(0,-2),workflow="15992bad-d1dd-4b48-98cb-5b57c6ec635b",owner="336868992";
+const digest=x=>createHash("sha256").update(JSON.stringify(x)).digest("hex");
+async function snapshot(){
+ const queries=[
+ ["checkpoint","SELECT revision,value,updated_at FROM eg_checkpoints WHERE owner=? AND project IN (?,?) ORDER BY project",[owner,proof,"eg-qualification-"+workflow]],
+ ["project","SELECT revision,value,updated_at FROM eg_projects WHERE owner=? AND project=?",[owner,project]],
+ ["history","SELECT revision,value,updated_at FROM eg_project_history WHERE owner=? AND project=? ORDER BY revision",[owner,project]],
+ ["workflow","SELECT id,state,updated_at FROM eg_workflows WHERE owner=? AND project=? AND id=?",[owner,project,workflow]],
+ ["steps","SELECT id,state,attempts,result,evidence FROM eg_workflow_steps WHERE owner=? AND project=? AND workflow_id=? ORDER BY step_key",[owner,project,workflow]]
+ ];
+ const result={};for(const [key,sql,params] of queries){
+ const response=await get("https://api.cloudflare.com/client/v4","/accounts/"+account+"/d1/database/657131f8-b0f4-47f3-ab3d-91840843f2db/query",{method:"POST",headers:{Authorization:"Bearer "+read,"Content-Type":"application/json"},body:JSON.stringify({sql,params})});
+ assert.ok(response.http===200&&response.body?.success);const rows=response.body.result[0].results;assert.ok(rows.length>0);result[key]={count:rows.length,sha256:digest(rows)};
+ }return result;
+}
+
 try{
  check("exact_checkout",process.env.GITHUB_REPOSITORY===repo&&process.env.GITHUB_REF==="refs/heads/"+branch&&/^[a-f0-9]{40}$/.test(sha||"")&&spawnSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).stdout.trim()===sha);
  check("account_and_credentials",account==="04b45c9393f4e12159c6b8118ec54791"&&!!management&&!!read&&tick?.length>=32);
  check("isolated_config",config.name==="execution-guard"&&config.previews.vars.EG_ENVIRONMENT==="preview"&&config.previews.vars.EG_AUTH_ENABLED==="true"&&config.previews.vars.EG_PREVIEW_READY==="true"&&config.previews.d1_databases.length===1&&config.previews.kv_namespaces.length===1&&config.previews.d1_databases[0].database_id==="657131f8-b0f4-47f3-ab3d-91840843f2db"&&config.previews.kv_namespaces[0].id==="25a30c61f53b422fa11889babb147fd4"&&config.d1_databases.every(d=>d.database_id!==config.previews.d1_databases[0].database_id)&&config.kv_namespaces.every(k=>k.id!==config.previews.kv_namespaces[0].id));
  before=await prod();out.production_before=before;
+ out.memory_before=await snapshot();
  // Wait for the automatic build to settle so it cannot overwrite the tagged direct deployment.
  let build;
  for(let i=0;i<24;i++){
@@ -78,6 +96,8 @@ try{
  check("browser_authorization_ready",page?.status===200&&(await page.text()).includes("Начать проверку"));
  const js=await req(host,"/qualification/oauth.js");check("browser_script_available",js.status===200&&js.headers.get("Content-Type")?.includes("javascript"));
  check("production_browser_route_denied",(await req("https://execution-guard.19wolf-alone92.workers.dev","/qualification/oauth")).status===404);
+ out.memory_after=await snapshot();check("prior_live_memory_preserved",JSON.stringify(out.memory_before)===JSON.stringify(out.memory_after));
+ check("prior_dag_seven_steps",out.memory_after.steps.count===7);
  out.status="DIRECT_PREVIEW_PASS";
 }catch(e){out.status="FAILED";out.failure=e?.name==="AssertionError"&&/^[a-z_]+$/.test(e.message)?e.message:"request_or_execution_error";process.exitCode=1;}
 finally{if(before){try{out.production_after=await prod();out.checks.production_unchanged=JSON.stringify(before)===JSON.stringify(out.production_after);if(!out.checks.production_unchanged)process.exitCode=1;}catch{out.checks.production_unchanged=false;process.exitCode=1;}}console.log("EXACT_PREVIEW_EVIDENCE "+JSON.stringify(out));}
