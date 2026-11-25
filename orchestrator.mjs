@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 const projectPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const workflowIdPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const stepKeyPattern = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+const idempotencyPattern = /^[A-Za-z0-9_-]{8,64}$/;
 const repoPartPattern = /^(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}$/;
 const shaPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const secretKeyPattern = /(?:token|secret|password|credential|private.?key|authorization|cookie)/i;
@@ -19,7 +20,7 @@ async function ensureSchema(db) {
   const statements = [
     "CREATE TABLE IF NOT EXISTS eg_projects (owner TEXT NOT NULL, project TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), value TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner,project))",
     "CREATE TABLE IF NOT EXISTS eg_project_history (owner TEXT NOT NULL, project TEXT NOT NULL, revision INTEGER NOT NULL, value TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner,project,revision))",
-    "CREATE TABLE IF NOT EXISTS eg_workflows (id TEXT PRIMARY KEY, owner TEXT NOT NULL, project TEXT NOT NULL, name TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('CREATED','QUEUED','BLOCKED','RUNNING','RETRYING','VERIFYING','SUCCEEDED','FAILED','CANCELLED','PAUSED','NEEDS_APPROVAL')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT, error_code TEXT)",
+    "CREATE TABLE IF NOT EXISTS eg_workflows (id TEXT PRIMARY KEY, owner TEXT NOT NULL, project TEXT NOT NULL, name TEXT NOT NULL, idempotency_key TEXT NOT NULL, definition_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('CREATED','QUEUED','BLOCKED','RUNNING','RETRYING','VERIFYING','SUCCEEDED','FAILED','CANCELLED','PAUSED','NEEDS_APPROVAL')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT, error_code TEXT, UNIQUE(owner,project,idempotency_key))",
     "CREATE INDEX IF NOT EXISTS eg_workflows_owner_project ON eg_workflows(owner,project,created_at)",
     "CREATE TABLE IF NOT EXISTS eg_workflow_steps (id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, owner TEXT NOT NULL, project TEXT NOT NULL, step_key TEXT NOT NULL, operation TEXT NOT NULL, input TEXT NOT NULL, depends_on TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('CREATED','QUEUED','BLOCKED','RUNNING','RETRYING','VERIFYING','SUCCEEDED','FAILED','CANCELLED','PAUSED','NEEDS_APPROVAL')), attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL, timeout_ms INTEGER NOT NULL, available_at INTEGER NOT NULL, lease_id TEXT, lease_until INTEGER, result TEXT, evidence TEXT, error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(workflow_id,step_key))",
     "CREATE INDEX IF NOT EXISTS eg_workflow_steps_dispatch ON eg_workflow_steps(state,available_at,lease_until)",
@@ -171,20 +172,29 @@ function validateSteps(steps) {
 }
 
 export async function workflowCreate(db, owner, args) {
-  if (!allKeys(args,["project","name","steps"]) || !projectPattern.test(args.project) || typeof args.name!=="string" || !args.name.trim() || bytes(args.name)>160) return {error:"invalid_arguments"};
+  if (!allKeys(args,["project","name","idempotency_key","steps"]) || !projectPattern.test(args.project) || typeof args.name!=="string" || !args.name.trim() || bytes(args.name)>160 || typeof args.idempotency_key!=="string" || !idempotencyPattern.test(args.idempotency_key)) return {error:"invalid_arguments"};
   const steps = validateSteps(args.steps);
   if (!steps) return {error:"invalid_workflow_definition"};
   await ensureSchema(db);
   const project = await db.prepare("SELECT project FROM eg_projects WHERE owner=? AND project=?").bind(owner,args.project).first();
   if (!project) return {error:"project_not_found"};
-  const counts = await db.prepare("SELECT COUNT(*) AS total,SUM(CASE WHEN state NOT IN ('SUCCEEDED','FAILED','CANCELLED') THEN 1 ELSE 0 END) AS active FROM eg_workflows WHERE owner=?").bind(owner).first();
-  if ((counts?.total ?? 0) >= 5000 || (counts?.active ?? 0) >= 100) return {error:"workflow_capacity"};
-  const id = crypto.randomUUID(), now = nowIso();
-  const statements = [db.prepare("INSERT INTO eg_workflows(id,owner,project,name,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(id,owner,args.project,args.name.trim(),"CREATED",now,now)];
-  for (const step of steps) statements.push(db.prepare("INSERT INTO eg_workflow_steps(id,workflow_id,owner,project,step_key,operation,input,depends_on,state,attempts,max_attempts,timeout_ms,available_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'CREATED',0,?,?,0,?,?)").bind(crypto.randomUUID(),id,owner,args.project,step.key,step.operation,JSON.stringify(step.input),JSON.stringify(step.depends_on),step.max_attempts,step.timeout_ms,now,now));
-  statements.push(db.prepare("INSERT INTO eg_execution_audit(id,owner,project,workflow_id,event,details,created_at) VALUES(?,?,?,?,?,?,?)").bind(crypto.randomUUID(),owner,args.project,id,"workflow_created",JSON.stringify({steps:steps.length}),now));
+  const id = crypto.randomUUID(), now = nowIso(), name=args.name.trim();
+  const definition=JSON.stringify({name,steps});
+  const definitionHash=createHash("sha256").update(definition,"utf8").digest("hex");
+  const statements = [
+    db.prepare("INSERT INTO eg_workflows(id,owner,project,name,idempotency_key,definition_hash,state,created_at,updated_at) SELECT ?,?,?,?,?,?,'CREATED',?,? WHERE (SELECT COUNT(*) FROM eg_workflows WHERE owner=?)<5000 AND (SELECT COUNT(*) FROM eg_workflows WHERE owner=? AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED'))<100 ON CONFLICT(owner,project,idempotency_key) DO NOTHING")
+      .bind(id,owner,args.project,name,args.idempotency_key,definitionHash,now,now,owner,owner)
+  ];
+  for (const step of steps) statements.push(db.prepare("INSERT INTO eg_workflow_steps(id,workflow_id,owner,project,step_key,operation,input,depends_on,state,attempts,max_attempts,timeout_ms,available_at,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,'CREATED',0,?,?,0,?,? WHERE EXISTS(SELECT 1 FROM eg_workflows WHERE id=? AND definition_hash=?)")
+    .bind(crypto.randomUUID(),id,owner,args.project,step.key,step.operation,JSON.stringify(step.input),JSON.stringify(step.depends_on),step.max_attempts,step.timeout_ms,now,now,id,definitionHash));
+  statements.push(db.prepare("INSERT INTO eg_execution_audit(id,owner,project,workflow_id,event,details,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM eg_workflows WHERE id=?)")
+    .bind(crypto.randomUUID(),owner,args.project,id,"workflow_created",JSON.stringify({steps:steps.length}),now,id));
   await db.batch(statements);
-  return {status:"created",workflow_id:id,project:args.project,state:"CREATED",steps:steps.length,created_at:now};
+  const existing=await db.prepare("SELECT id,state,definition_hash FROM eg_workflows WHERE owner=? AND project=? AND idempotency_key=?").bind(owner,args.project,args.idempotency_key).first();
+  if(!existing)return {error:"workflow_capacity"};
+  if(existing.definition_hash!==definitionHash)return {error:"idempotency_conflict"};
+  if(existing.id!==id)return {status:"existing",workflow_id:existing.id,project:args.project,state:existing.state,deduplicated:true};
+  return {status:"created",workflow_id:id,project:args.project,state:"CREATED",steps:steps.length,created_at:now,deduplicated:false};
 }
 
 async function loadWorkflow(db, owner, project, id) {
