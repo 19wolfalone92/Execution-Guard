@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
-import {gatewayRoute} from "../security.mjs";
+import {gatewayRoute,PREVIEW_HOST,HOST} from "../security.mjs";
 import worker from "../worker.mjs";
 
 test("Cloudflare Preview bindings are either absent or explicitly separate from production",()=>{
@@ -51,4 +51,23 @@ test("unexpected preview bindings are reported but never accessed",async()=>{
   assert.equal(h.database,"not_verified");
   assert.deepEqual(h.storage_guard,{state:"blocked",d1_binding_present:true,kv_binding_present:true});
   assert.equal((await gateway.fetch(new Request(host+"/mcp-private",{method:"POST",body:"{}"}),env,{})).status,503);
+});
+
+test("Preview readiness diagnoses missing secrets without reading stores or exposing values",async()=>{
+  const fail=()=>{throw Error("must not access storage")};
+  const gw=gatewayRoute(worker,{fetch:fail});
+  const env={EG_ENVIRONMENT:"preview",EG_AUTH_ENABLED:"true",EG_PREVIEW_READY:"true",EG_OWNER_GITHUB_ID:"123",GITHUB_CLIENT_ID:"example-client",DB:{prepare:fail},OAUTH_KV:{get:fail}};
+  const res=await gw.fetch(new Request(PREVIEW_HOST+"/qualification/readiness"),env,{});
+  const d=await res.json();assert.equal(res.status,200);
+  assert.equal(d.checks.github_client_secret_present,false);assert.equal(d.d1_marker,"not_checked");assert.equal(d.kv_marker,"not_checked");assert.equal(d.ready,false);
+  assert.ok(!JSON.stringify(d).includes("example-client"));
+  assert.equal((await gw.fetch(new Request(HOST+"/qualification/readiness"),env,{})).status,404);
+});
+test("Preview readiness distinguishes marker failures and independently verifies both",async()=>{
+  const gw=gatewayRoute(worker,{fetch(){throw Error("provider must not be reached")}});
+  const env={EG_ENVIRONMENT:"preview",EG_AUTH_ENABLED:"true",EG_PREVIEW_READY:"true",EG_OWNER_GITHUB_ID:"123",GITHUB_CLIENT_ID:"client",GITHUB_CLIENT_SECRET:"test-only",EG_PREVIEW_TICK_SECRET:"x".repeat(32),DB:{prepare(){return {first:async()=>({value:"execution-guard-preview-v1"})}}},OAUTH_KV:{get:async()=>null}};
+  const read=async e=>(await gw.fetch(new Request(PREVIEW_HOST+"/qualification/readiness"),e,{})).json();
+  let d=await read(env);assert.equal(d.d1_marker,"verified");assert.equal(d.kv_marker,"missing_or_mismatch");assert.equal(d.ready,false);
+  d=await read({...env,OAUTH_KV:{get:async()=>{throw Error("do not disclose raw details")}}});assert.equal(d.kv_marker,"read_failed");assert.equal(d.ready,false);assert.ok(!JSON.stringify(d).includes("raw details"));
+  d=await read({...env,OAUTH_KV:{get:async()=>"execution-guard-preview-v1"}});assert.equal(d.ready,true);assert.equal(d.kv_marker,"verified");
 });

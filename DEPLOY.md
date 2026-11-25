@@ -68,3 +68,6 @@ The owner supplied test D1 657131f8-b0f4-47f3-ab3d-91840843f2db and test KV 25a3
 
 ### Owner-confirmed marker initialization
 Owner reports dedicated D1 and KV marker initialization complete. Enable only the Preview flags; the existing runtime guard still requires both markers and complete OAuth bindings before private access. Live exact-SHA HTTP qualification is required; owner confirmation is not independent runtime proof. The previous staged deployment succeeded but its CI discovery timed out, so increase the bounded discovery window and record status diagnostics. No production changes.
+
+### Live readiness diagnosis
+On ee1a56c, deployment 0f1cac0d-f3c8-412b-bc46-0a9dbc57ae71 succeeded; immutable and stable HTTP health confirmed both bindings present, but stable readiness remained blocked. No diagnosis of missing secrets versus wrong flags or test markers was possible from the former masked health response. Add a stable-Preview-only GET /qualification/readiness returning boolean configuration presence and fixed marker result codes. It reads only the two identity markers after configuration validation; never returns secrets, raw errors or data. The new CI logs this report before asserting readiness. Production endpoint remains 404. No storage, OAuth or deployment settings changed by this diagnostic commit.

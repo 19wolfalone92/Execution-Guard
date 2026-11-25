@@ -48,9 +48,14 @@ if(!enabled){
 }
 else{
   const stable="https://audit-oauth-e2e-20261125-execution-guard.19wolf-alone92.workers.dev";
+  const readiness=await fetch(stable+"/qualification/readiness",{redirect:"manual",signal:AbortSignal.timeout(15000)});
+  assert.equal(readiness.status,200);const report=await readiness.json();
+  console.log("PREVIEW READINESS "+JSON.stringify(report));
   const r=await fetch(stable+"/health",{redirect:"manual",signal:AbortSignal.timeout(15000)});
   assert.equal(r.status,200);const state=await r.json();
   console.log("STABLE PREVIEW HEALTH "+JSON.stringify(state));
+  assert.equal(report.ready,true,"Preview readiness: inspect fixed diagnostic codes above");
+  assert.equal(report.checks.tick_secret_configured,true,"Preview tick secret missing or too short");
   assert.equal(state.version,"0.6.0");assert.equal(state.database,"online");assert.equal(state.persistence_probe,"verified");assert.equal(state.oauth_storage,"bound");assert.equal(state.oauth.discovery,"verified");
   const unauthorized=await fetch(stable+"/mcp-private",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"}),redirect:"manual",signal:AbortSignal.timeout(15000)});
   assert.equal(unauthorized.status,401);assert.match(unauthorized.headers.get("WWW-Authenticate")||"",/resource_metadata=/);

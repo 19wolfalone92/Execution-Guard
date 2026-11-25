@@ -14,12 +14,34 @@ export function configured(env) {
 }
 // A configuration flag alone cannot establish storage isolation. Separate
 // test resources must carry both markers before any private Preview operation.
+export async function previewReadiness(env) {
+  // Boolean presence and fixed diagnostic codes only. Never return secret
+  // values, resource identifiers, raw storage errors or user data.
+  const checks={
+    environment:env?.EG_ENVIRONMENT==="preview",
+    auth_enabled:env?.EG_AUTH_ENABLED==="true",
+    ready_flag:env?.EG_PREVIEW_READY==="true",
+    owner_id_valid:typeof env?.EG_OWNER_GITHUB_ID==="string"&&/^\d+$/.test(env.EG_OWNER_GITHUB_ID),
+    github_client_id_present:typeof env?.GITHUB_CLIENT_ID==="string"&&env.GITHUB_CLIENT_ID.trim().length>0,
+    github_client_secret_present:typeof env?.GITHUB_CLIENT_SECRET==="string"&&env.GITHUB_CLIENT_SECRET.trim().length>0,
+    tick_secret_configured:typeof env?.EG_PREVIEW_TICK_SECRET==="string"&&env.EG_PREVIEW_TICK_SECRET.length>=32,
+    d1_binding_present:Boolean(env?.DB),
+    kv_binding_present:Boolean(env?.OAUTH_KV)
+  };
+  const result={checks,d1_marker:"not_checked",kv_marker:"not_checked",ready:false};
+  if(!checks.environment||!configured(env)||!checks.owner_id_valid||!checks.github_client_id_present||!checks.github_client_secret_present)return result;
+  // Read only the known test identity markers, never arbitrary data.
+  const [d,k]=await Promise.allSettled([
+    Promise.resolve().then(()=>env.DB.prepare("SELECT value FROM eg_preview_identity WHERE id=1").first()),
+    Promise.resolve().then(()=>env.OAUTH_KV.get("eg:preview:identity"))
+  ]);
+  result.d1_marker=d.status==="rejected"?"read_failed":d.value?.value==="execution-guard-preview-v1"?"verified":"missing_or_mismatch";
+  result.kv_marker=k.status==="rejected"?"read_failed":k.value==="execution-guard-preview-v1"?"verified":"missing_or_mismatch";
+  result.ready=result.d1_marker==="verified"&&result.kv_marker==="verified";
+  return result;
+}
 export async function previewStorageReady(env) {
-  if(env?.EG_ENVIRONMENT!=="preview"||!configured(env))return false;
-  try {
-    const [d,k]=await Promise.all([env.DB.prepare("SELECT value FROM eg_preview_identity WHERE id=1").first(),env.OAUTH_KV.get("eg:preview:identity")]);
-    return d?.value==="execution-guard-preview-v1"&&k==="execution-guard-preview-v1";
-  } catch {return false;}
+  return (await previewReadiness(env)).ready;
 }
 export function isOwner(env, ctx) {
   return configured(env) && typeof ctx?.props?.userId === "string" &&
@@ -53,6 +75,11 @@ export async function oauthDiagnostics(env, provider, ctx) {
 export function gatewayRoute(publicWorker, provider) {
   return {async fetch(request,env,ctx) {
     const url = new URL(request.url);
+    if(url.pathname==="/qualification/readiness"){
+      if(url.origin!==PREVIEW_HOST)return new Response("Not found",{status:404});
+      if(request.method!=="GET")return new Response(null,{status:405});
+      return Response.json(await previewReadiness(env),{headers:{"Cache-Control":"no-store"}});
+    }
     if (["/","/health","/mcp"].includes(url.pathname)) {
       const production=url.origin===HOST&&env?.EG_ENVIRONMENT!=="preview";
       const isolated=url.origin===PREVIEW_HOST&&await previewStorageReady(env);
