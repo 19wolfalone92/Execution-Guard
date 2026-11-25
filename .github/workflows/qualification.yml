@@ -8,12 +8,26 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
-      - run: npm install --ignore-scripts --no-audit --no-fund
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install pinned dependencies and generate lockfile during qualification
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Report dependency audit details
+        run: |
+          npm audit --json > npm-audit.json || true
+          node --input-type=module -e 'import fs from "node:fs"; const a=JSON.parse(fs.readFileSync("npm-audit.json","utf8")); const v=a.vulnerabilities||{}; console.log(JSON.stringify({counts:a.metadata?.vulnerabilities||{},findings:Object.entries(v).map(([name,x])=>({name,severity:x.severity,isDirect:x.isDirect,range:x.range,via:x.via,fixAvailable:x.fixAvailable}))},null,2));'
       - run: npm test
-      - run: npx --yes wrangler deploy --dry-run --outdir .wrangler/dry-run
+      - run: npx wrangler deploy --dry-run --outdir .wrangler/dry-run
+      - name: Upload generated lockfile and audit report for review
+        uses: actions/upload-artifact@v7
+        with:
+          name: dependency-qualification
+          path: |
+            package-lock.json
+            npm-audit.json
+          if-no-files-found: error
