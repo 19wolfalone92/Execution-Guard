@@ -15,3 +15,16 @@ test("cancel only queued and invalid job rejected",async()=>{const {db,adapter:d
 test("bounded retries and final failure on missing probe",async()=>{const {db,adapter:d}=dbFixture();try{const a=await taskSubmit(d,owner,{project,idempotency_key:"unique04",kind:"health_probe",payload:{}},1000);await runNextTask(d,owner,1000);assert.equal((await taskStatus(d,owner,{project,task_id:a.task_id})).state,"queued");assert.equal((await runNextTask(d,owner,1001)).claimed,false);await runNextTask(d,owner,61000);await runNextTask(d,owner,181000);const s=await taskStatus(d,owner,{project,task_id:a.task_id});assert.equal(s.state,"failed");assert.equal(s.attempts,3)}finally{db.close()}});
 test("expired lease recovery and concurrent claim without duplicate execution",async()=>{const {db,adapter:d}=dbFixture();try{const a=await taskSubmit(d,owner,shaArgs("unique05"),1000);db.prepare("UPDATE eg_tasks SET state='running',attempts=1,lease_id='old',lease_until=1001 WHERE id=?").run(a.task_id);assert.equal((await runNextTask(d,owner,1000)).claimed,false);const r=await Promise.all([runNextTask(d,owner,1002),runNextTask(d,owner,1002)]);assert.equal(r.filter(x=>x.claimed).length,1);const s=await taskStatus(d,owner,{project,task_id:a.task_id});assert.equal(s.state,"succeeded");assert.equal(s.attempts,2)}finally{db.close()}});
 test("health probe actually checks storage",async()=>{const {db,adapter:d}=dbFixture();try{db.exec("CREATE TABLE eg_probe(id INTEGER PRIMARY KEY,value TEXT);INSERT INTO eg_probe VALUES(1,'execution-guard-v030')");const a=await taskSubmit(d,owner,{project,idempotency_key:"unique06",kind:"health_probe",payload:{}},1000);await runNextTask(d,owner,1000);const s=await taskStatus(d,owner,{project,task_id:a.task_id});assert.equal(s.state,"succeeded");assert.equal(s.result.persistence_probe,"verified")}finally{db.close()}});
+
+test("MCP task tools enforce owner and write scope",async()=>{
+  const {privateFetch}=await import("../private.mjs");const {HOST,READ,WRITE}=await import("../security.mjs");
+  const {db,adapter:d}=dbFixture();const env={EG_AUTH_ENABLED:"true",EG_OWNER_GITHUB_ID:owner,GITHUB_CLIENT_ID:"test",GITHUB_CLIENT_SECRET:"fake",OAUTH_KV:{},DB:d};
+  const ctx=scope=>({props:{userId:owner},auth:{scope}});
+  const request=(name,args)=>new Request(HOST+"/mcp-private",{method:"POST",body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:args}})});
+  try{
+    const denied=await privateFetch(request("task_submit",shaArgs("unique07")),env,ctx([READ]));assert.equal((await denied.json()).result.isError,true);
+    const submitted=await privateFetch(request("task_submit",shaArgs("unique07")),env,ctx([READ,WRITE]));const a=JSON.parse((await submitted.json()).result.content[0].text);assert.equal(a.state,"queued");
+    const status=await privateFetch(request("task_status",{project,task_id:a.task_id}),env,ctx([READ]));assert.equal(JSON.parse((await status.json()).result.content[0].text).task_id,a.task_id);
+    assert.equal((await privateFetch(request("task_status",{project,task_id:a.task_id}),env,{props:{userId:"other"},auth:{scope:[READ]}})).status,403);
+  }finally{db.close()}
+});
