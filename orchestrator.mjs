@@ -12,8 +12,10 @@ const nowIso = () => new Date().toISOString();
 const bytes = value => new TextEncoder().encode(value).length;
 const isObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const allKeys = (value, keys) => isObject(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value,key));
+const schemaReady = new WeakSet();
 
 async function ensureSchema(db) {
+  if (schemaReady.has(db)) return;
   const statements = [
     "CREATE TABLE IF NOT EXISTS eg_projects (owner TEXT NOT NULL, project TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), value TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner,project))",
     "CREATE TABLE IF NOT EXISTS eg_project_history (owner TEXT NOT NULL, project TEXT NOT NULL, revision INTEGER NOT NULL, value TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner,project,revision))",
@@ -25,6 +27,7 @@ async function ensureSchema(db) {
     "CREATE INDEX IF NOT EXISTS eg_execution_audit_project ON eg_execution_audit(owner,project,created_at)"
   ];
   for (const sql of statements) await db.prepare(sql).run();
+  schemaReady.add(db);
 }
 
 function scanForSecrets(value, depth = 0) {
@@ -41,6 +44,14 @@ function scanForSecrets(value, depth = 0) {
 function validateRecord(record) {
   if (!isObject(record) || Object.keys(record).some(key => !projectFields.has(key))) return null;
   if (!scanForSecrets(record)) return null;
+  const textField = (key,max) => record[key] === undefined || (typeof record[key] === "string" && bytes(record[key]) <= max);
+  const stringArray = (key,maxItems,maxBytes) => record[key] === undefined || (Array.isArray(record[key]) && record[key].length <= maxItems && record[key].every(item => typeof item === "string" && bytes(item) <= maxBytes));
+  if (!textField("goal",2000) || !textField("branch",255) || !textField("commit",64) || !textField("stage",200) || !textField("next_action",2000)) return null;
+  if (record.pull_request !== undefined && (!Number.isSafeInteger(record.pull_request) || record.pull_request < 1)) return null;
+  if (!stringArray("rules",50,1000) || !stringArray("completed",100,500) || !stringArray("pending",100,500) || !stringArray("errors",100,1000) || !stringArray("limitations",100,1000)) return null;
+  if (record.repository !== undefined && (!isObject(record.repository) || !allKeys(record.repository,["owner","repo"]) || !repoPartPattern.test(record.repository.owner) || !repoPartPattern.test(record.repository.repo))) return null;
+  if (record.tests !== undefined && !isObject(record.tests)) return null;
+  if (record.evidence !== undefined && (!Array.isArray(record.evidence) || record.evidence.length > 100 || record.evidence.some(item => !isObject(item)))) return null;
   let serialized;
   try { serialized = JSON.stringify(record); } catch { return null; }
   if (bytes(serialized) > 8192) return null;
@@ -52,6 +63,7 @@ async function audit(db, owner, project, event, details = {}, workflowId = null)
   if (bytes(serialized) > 2048 || !scanForSecrets(details)) return;
   await db.prepare("INSERT INTO eg_execution_audit(id,owner,project,workflow_id,event,details,created_at) VALUES(?,?,?,?,?,?,?)")
     .bind(crypto.randomUUID(),owner,project,workflowId,event,serialized,nowIso()).run();
+  await db.prepare("DELETE FROM eg_execution_audit WHERE owner=? AND id IN (SELECT id FROM eg_execution_audit WHERE owner=? ORDER BY created_at DESC LIMIT -1 OFFSET 10000)").bind(owner,owner).run();
 }
 
 function parseJson(value, fallback = null) {
@@ -94,7 +106,8 @@ export async function projectUpdate(db, owner, args) {
   const result = await db.batch([
     db.prepare("UPDATE eg_projects SET revision=revision+1,value=?,updated_at=? WHERE owner=? AND project=? AND revision=?").bind(value,now,owner,args.project,args.expected_revision),
     db.prepare("INSERT INTO eg_project_history(owner,project,revision,value,updated_at) SELECT owner,project,revision,value,updated_at FROM eg_projects WHERE owner=? AND project=? AND revision=? AND changes()=1").bind(owner,args.project,args.expected_revision+1),
-    db.prepare("INSERT INTO eg_execution_audit(id,owner,project,event,details,created_at) SELECT ?,?,?,?, '{}',? WHERE changes()=1").bind(crypto.randomUUID(),owner,args.project,"project_updated",now)
+    db.prepare("INSERT INTO eg_execution_audit(id,owner,project,event,details,created_at) SELECT ?,?,?,?, '{}',? WHERE changes()=1").bind(crypto.randomUUID(),owner,args.project,"project_updated",now),
+    db.prepare("DELETE FROM eg_project_history WHERE owner=? AND project=? AND revision <= (SELECT MAX(revision)-100 FROM eg_project_history WHERE owner=? AND project=?) AND changes()=1").bind(owner,args.project,owner,args.project)
   ]);
   if (result[0]?.meta?.changes !== 1) {
     const latest = await db.prepare("SELECT revision FROM eg_projects WHERE owner=? AND project=?").bind(owner,args.project).first();
