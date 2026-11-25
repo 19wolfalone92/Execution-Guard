@@ -4,6 +4,7 @@ import publicWorker from "./worker.mjs";
 import { HOST, RESOURCE, PREVIEW_HOST, authHost, READ, WRITE, CLIENT, consentHtml, s256, gatewayRoute, configured, previewStorageReady } from "./security.mjs";
 import { privateFetch } from "./private.mjs";
 import { runBatch } from "./tasks.mjs";
+import { browserClientApproved, provisionBrowserClient, browserQualificationRoute } from "./preview-browser.mjs";
 
 const callbackUrl=env=>authHost(env)+"/callback";
 const chatgptRedirect="https://chatgpt.com/connector_platform_oauth_redirect";
@@ -13,7 +14,7 @@ async function registeredId(env) {
   return await env.OAUTH_KV.get(registeredKey);
 }
 async function approvedClient(env,id) {
-  return id===CLIENT || (typeof id==="string" && id.length>0 && id===await registeredId(env));
+  return id===CLIENT || (typeof id==="string" && id.length>0 && (id===await registeredId(env)||await browserClientApproved(env,id)));
 }
 // Provision once from the trusted scheduled handler, never from a public request.
 async function provisionRegisteredClient(env,oauth) {
@@ -168,6 +169,14 @@ const gateway=gatewayRoute(publicWorker,provider);
 const previewGateway=gatewayRoute(publicWorker,previewProvider);
 export default {...gateway,async fetch(request,env,ctx){
   const url=new URL(request.url);
+  if(url.pathname.startsWith("/qualification/oauth"))return browserQualificationRoute(request,env);
+  if(url.pathname==="/qualification/version"){
+    const immutable=/^https:\/\/[a-f0-9]{8}-execution-guard\.19wolf-alone92\.workers\.dev$/.test(url.origin);
+    if(env.EG_ENVIRONMENT!=="preview"||!(url.origin===PREVIEW_HOST||immutable))return new Response("Not found",{status:404});
+    if(request.method!=="GET")return new Response(null,{status:405});
+    const m=env.CF_VERSION_METADATA;
+    return Response.json({sha:/^[a-f0-9]{40}$/.test(env.EG_RELEASE_SHA||"")?env.EG_RELEASE_SHA:null,version_id:m?.id||null,tag:m?.tag||null,timestamp:m?.timestamp||null},{headers:{"Cache-Control":"no-store"}});
+  }
   // Previews have no platform Cron. A bounded test-only tick is guarded by
   // exact stable preview origin, explicit environment opt-in and a separate secret.
   if(url.pathname==="/qualification/tick"){
@@ -176,7 +185,9 @@ export default {...gateway,async fetch(request,env,ctx){
     const secret=env.EG_PREVIEW_TICK_SECRET,provided=request.headers.get("Authorization")||"";
     if(typeof secret!=="string"||secret.length<32||provided.length>512||!timingSafeEqual(createHash("sha256").update(provided).digest(),createHash("sha256").update("Bearer "+secret).digest()))return new Response("Forbidden",{status:403});
     if(!await previewStorageReady(env))return new Response("Preview storage not qualified",{status:503});
-    await provisionRegisteredClient(env,getOAuthApi(previewOptions,env));
+    const api=getOAuthApi(previewOptions,env);
+    await provisionRegisteredClient(env,api);
+    await provisionBrowserClient(env,api);
     await runBatch(env.DB,env.EG_OWNER_GITHUB_ID);
     return Response.json({status:"tick_completed",environment:"preview"},{headers:{"Cache-Control":"no-store"}});
   }

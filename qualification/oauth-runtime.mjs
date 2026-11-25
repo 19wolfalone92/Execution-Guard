@@ -26,7 +26,7 @@ const options=scriptPath=>({
   // This is a test-only cap; production Wrangler configuration is unchanged.
   compatibilityDate:config.compatibility_date>"2026-08-06"?"2026-08-06":config.compatibility_date,
   compatibilityFlags:config.compatibility_flags,
-  bindings:{EG_AUTH_ENABLED:"true",EG_OWNER_GITHUB_ID:owner,GITHUB_CLIENT_ID:"qualification-client",GITHUB_CLIENT_SECRET:"qualification-secret",...(preview?{EG_ENVIRONMENT:"preview",EG_PREVIEW_READY:"true",EG_PREVIEW_TICK_SECRET:testTickSecret}:{})},
+  bindings:{EG_AUTH_ENABLED:"true",EG_OWNER_GITHUB_ID:owner,GITHUB_CLIENT_ID:"qualification-client",GITHUB_CLIENT_SECRET:"qualification-secret",...(preview?{EG_ENVIRONMENT:"preview",EG_PREVIEW_READY:"true",EG_PREVIEW_TICK_SECRET:testTickSecret,EG_PREVIEW_BROWSER_QUALIFICATION:"true"}:{})},
   kvNamespaces:["OAUTH_KV"],d1Databases:["DB"],fetchMock:mock,cf:false
 });
 let mf=new Miniflare(options(baselinePath||candidatePath));
@@ -116,6 +116,12 @@ try{
   const unauthorized=await call("/mcp-private",{method:"POST",headers:{"Content-Type":"application/json"},body:'{"jsonrpc":"2.0","id":1,"method":"tools/list"}'});
   ok(unauthorized.status===401&&/resource_metadata=/.test(unauthorized.headers.get("WWW-Authenticate")||""),"unauthenticated MCP discovery challenge");
   clientId=await provision();
+  if(preview){
+    const page=await call("/qualification/oauth");ok(page.status===200,"isolated browser qualification page available");
+    const html=await page.text();const browserId=html.match(/name="client-id" content="([^"]+)"/)?.[1];ok(!!browserId&&browserId!==clientId,"separate fixed-return public qualification client");
+    const consent=await call(authorizationURL(undefined,{client_id:browserId,redirect_uri:host+"/qualification/oauth/return"}));ok(consent.status===200,"browser qualification client accepts exact redirect");
+    const bad=await call(authorizationURL(undefined,{client_id:browserId,redirect_uri:"https://example.invalid/callback"}));ok(bad.status>=400,"browser qualification rejects wrong redirect");
+  }
   const unknown=await call(authorizationURL(undefined,{client_id:"unapproved"}));ok(unknown.status===403,"unknown client rejected");
   const unsafe=await call(authorizationURL(undefined,{redirect_uri:"https://example.invalid/callback"}));ok(unsafe.status>=400,"unregistered redirect rejected");
   const noPkce=await call(authorizationURL(undefined,{code_challenge:"",code_challenge_method:""}));ok(noPkce.status>=400||new URL(noPkce.headers.get("Location")||host).searchParams.has("error"),"missing PKCE rejected");
