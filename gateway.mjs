@@ -1,3 +1,4 @@
+import { recoveryQualification } from "./recovery-qualification.mjs";
 import { githubReadFetcher } from "./github-read.mjs";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { OAuthProvider, AuthorizationError, CimdFetchError, getOAuthApi } from "@cloudflare/workers-oauth-provider";
@@ -187,6 +188,11 @@ export default {...gateway,async fetch(request,env,ctx){
     const secret=env.EG_PREVIEW_TICK_SECRET,provided=request.headers.get("Authorization")||"";
     if(typeof secret!=="string"||secret.length<32||provided.length>512||!timingSafeEqual(createHash("sha256").update(provided).digest(),createHash("sha256").update("Bearer "+secret).digest()))return new Response("Forbidden",{status:403});
     if(!await previewStorageReady(env))return new Response("Preview storage not qualified",{status:503});
+    if(url.searchParams.get("diagnostic")==="recovery"){
+      if(env.EG_PREVIEW_BROWSER_QUALIFICATION!=="true")return new Response("Not found",{status:404});
+      try{return Response.json(await recoveryQualification(env.DB,url.searchParams),{headers:{"Cache-Control":"no-store"}});}
+      catch{return Response.json({status:"FAIL",reason:"fixture_execution_failed"},{status:500,headers:{"Cache-Control":"no-store"}});}
+    }
     if(url.searchParams.get("diagnostic")==="github"){
       const trace={};
       const traced=async (target,options)=>{

@@ -1,3 +1,4 @@
+import {remoteRecovery} from "./remote-recovery.mjs";
 import assert from "node:assert/strict";
 import {readFileSync,writeFileSync} from "node:fs";
 import {spawnSync} from "node:child_process";
@@ -98,6 +99,9 @@ try{
  check("production_browser_route_denied",(await req("https://execution-guard.19wolf-alone92.workers.dev","/qualification/oauth")).status===404);
  out.memory_after=await snapshot();check("prior_live_memory_preserved",JSON.stringify(out.memory_before)===JSON.stringify(out.memory_after));
  check("prior_dag_seven_steps",out.memory_after.steps.count===7);
+ const recovery=await remoteRecovery(host,tick);console.log("REMOTE_RECOVERY "+JSON.stringify(recovery));out.recovery={passed:recovery.passed,total:recovery.total};check("remote_recovery",recovery.passed===recovery.total);
+ const denied=await req(host,"/qualification/tick?diagnostic=recovery",{method:"POST"});check("recovery_requires_secret",denied.status===403);
+ const prodDenied=await req("https://execution-guard.19wolf-alone92.workers.dev","/qualification/tick?diagnostic=recovery",{method:"POST"});check("production_recovery_denied",prodDenied.status===404);
  out.status="DIRECT_PREVIEW_PASS";
 }catch(e){out.status="FAILED";out.failure=e?.name==="AssertionError"&&/^[a-z_]+$/.test(e.message)?e.message:"request_or_execution_error";process.exitCode=1;}
 finally{if(before){try{out.production_after=await prod();out.checks.production_unchanged=JSON.stringify(before)===JSON.stringify(out.production_after);if(!out.checks.production_unchanged)process.exitCode=1;}catch{out.checks.production_unchanged=false;process.exitCode=1;}}console.log("EXACT_PREVIEW_EVIDENCE "+JSON.stringify(out));}
