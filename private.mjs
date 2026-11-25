@@ -12,7 +12,7 @@ const def = (name,description,properties,required,write=false) => ({
 const project={type:"string",pattern:"^[a-z0-9][a-z0-9_-]{0,63}$"};
 const taskId={type:"string",pattern:"^[a-f0-9-]{36}$"};
 const tools=[
-  def("task_submit","Queue a bounded health probe or SHA-256 verification for the server scheduler. No arbitrary commands or external writes.",{project,idempotency_key:{type:"string",minLength:8,maxLength:64},kind:{type:"string",enum:["health_probe","sha256_verify"]},payload:{type:"object"}},["project","idempotency_key","kind","payload"],true),
+  def("task_submit","Queue a bounded health probe or SHA-256 verification for the server scheduler. No arbitrary commands or external writes.",{project,idempotency_key:{type:"string",pattern:"^[a-zA-Z0-9_-]{8,64}$"},kind:{type:"string",enum:["health_probe","sha256_verify"]},payload:{type:"object",description:"Use {} for health_probe; use {text, expected_sha256} for sha256_verify.",properties:{text:{type:"string",maxLength:4096},expected_sha256:{type:"string",pattern:"^[a-f0-9]{64}$"}},additionalProperties:false}},["project","idempotency_key","kind","payload"],true),
   def("task_status","Read persisted task state and verification evidence.",{project,task_id:taskId},["project","task_id"]),
   def("task_cancel","Cancel a queued task; running and terminal tasks are not changed.",{project,task_id:taskId},["project","task_id"],true),
   def("whoami","Verify authenticated owner identity and granted checkpoint scopes.",{},[]),
