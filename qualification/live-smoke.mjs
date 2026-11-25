@@ -6,7 +6,7 @@ const request=async(path,options={})=>fetch(host+path,{...options,redirect:"manu
 const healthResponse=await request("/health");
 assert.equal(healthResponse.status,200,"production health endpoint");
 const health=await healthResponse.json();
-assert.match(health.version,/^\\d+\\.\\d+\\.\\d+$/,"production version is reported");
+assert.match(health.version,/^\d+\.\d+\.\d+$/,"production version is reported");
 assert.equal(health.status,"online");
 assert.equal(health.database,"online");
 assert.equal(health.persistence_probe,"verified");
