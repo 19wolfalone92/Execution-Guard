@@ -1,10 +1,15 @@
 export const HOST = "https://execution-guard.19wolf-alone92.workers.dev";
 export const RESOURCE = HOST + "/mcp-private";
+export const PREVIEW_HOST = "https://audit-oauth-e2e-20261125-execution-guard.19wolf-alone92.workers.dev";
+// Never derive an OAuth issuer from Host/forwarded headers.
+export function authHost(env) {
+  return env?.EG_ENVIRONMENT === "preview" ? PREVIEW_HOST : HOST;
+}
 export const READ = "eg:read";
 export const WRITE = "eg:write";
 export const CLIENT = "https://chatgpt.com/oauth/client.json";
 export function configured(env) {
-  return env?.EG_AUTH_ENABLED === "true" && /^\d+$/.test(env.EG_OWNER_GITHUB_ID || "") &&
+  return (!env?.EG_ENVIRONMENT || env.EG_ENVIRONMENT==="production" || (env.EG_ENVIRONMENT==="preview" && env.EG_PREVIEW_READY==="true")) && env?.EG_AUTH_ENABLED === "true" && /^\d+$/.test(env.EG_OWNER_GITHUB_ID || "") &&
     Boolean(env.OAUTH_KV && env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET && env.DB);
 }
 export function isOwner(env, ctx) {
@@ -25,12 +30,13 @@ export async function s256(value) {
 export async function oauthDiagnostics(env, provider, ctx) {
   if (!configured(env)) return {configuration:env?.EG_AUTH_ENABLED==="true"?"incomplete":"disabled",discovery:"not_ready"};
   try {
+    const host=authHost(env),resourceUrl=host+"/mcp-private";
     const paths=["/.well-known/oauth-protected-resource/mcp-private","/.well-known/oauth-authorization-server"];
-    const [resource,issuer]=await Promise.all(paths.map(p=>provider.fetch(new Request(HOST+p),env,ctx)));
+    const [resource,issuer]=await Promise.all(paths.map(p=>provider.fetch(new Request(host+p),env,ctx)));
     const result={configuration:"ready",resource_http:resource.status,issuer_http:issuer.status,discovery:"invalid"};
     if(resource.ok&&issuer.ok){
       const [r,a]=await Promise.all([resource.json(),issuer.json()]);
-      result.discovery=r.resource===RESOURCE&&r.authorization_servers?.includes(a.issuer)&&a.issuer===HOST&&a.authorization_endpoint===HOST+"/authorize"&&a.token_endpoint===HOST+"/oauth/token"&&a.code_challenge_methods_supported?.includes("S256")&&a.client_id_metadata_document_supported===true?"verified":"invalid_metadata";
+      result.discovery=r.resource===resourceUrl&&r.authorization_servers?.includes(a.issuer)&&a.issuer===host&&a.authorization_endpoint===host+"/authorize"&&a.token_endpoint===host+"/oauth/token"&&a.code_challenge_methods_supported?.includes("S256")&&a.client_id_metadata_document_supported===true?"verified":"invalid_metadata";
     }
     return result;
   } catch {return {configuration:"ready",discovery:"provider_error"};}
@@ -40,7 +46,7 @@ export function gatewayRoute(publicWorker, provider) {
     const url = new URL(request.url);
     if (["/","/health","/mcp"].includes(url.pathname)) return publicWorker.fetch(request,env,ctx,()=>oauthDiagnostics(env,provider,ctx));
     if (url.pathname === "/mcp-private" || url.pathname === "/authorize" || url.pathname === "/callback" || url.pathname === "/oauth/token" || url.pathname.startsWith("/.well-known/")) {
-      if (url.origin !== HOST) return new Response("Unknown host",{status:404});
+      if (url.origin !== authHost(env)) return new Response("Unknown host",{status:404});
       if (!configured(env)) return new Response("Private access not configured",{status:503,headers:{"Cache-Control":"no-store"}});
       return provider.fetch(request,env,ctx);
     }

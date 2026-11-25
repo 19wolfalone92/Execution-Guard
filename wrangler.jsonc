@@ -27,7 +27,9 @@
   ],
   "previews": {
     "vars": {
-      "EG_AUTH_ENABLED": "false"
+      "EG_AUTH_ENABLED": "false",
+      "EG_ENVIRONMENT": "preview",
+      "EG_PREVIEW_READY": "false"
     },
     "d1_databases": [],
     "kv_namespaces": []

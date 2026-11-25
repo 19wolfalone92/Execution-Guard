@@ -1,0 +1,14 @@
+import assert from "node:assert/strict";
+const host="https://b9159ddf-execution-guard.19wolf-alone92.workers.dev";
+const request=(p,opts={})=>fetch(host+p,{...opts,redirect:"manual",signal:AbortSignal.timeout(15000)});
+const health=await request("/health");assert.equal(health.status,200);
+const h=await health.json();
+assert.equal(h.version,"0.6.0");assert.equal(h.status,"online");
+assert.equal(h.database,"not_verified");assert.equal(h.persistence_probe,"not_verified");
+assert.equal(h.oauth_storage,"not_bound");assert.equal(h.oauth.configuration,"disabled");
+const post=(p,method,params={})=>request(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params})});
+const init=await post("/mcp","initialize",{protocolVersion:"2025-11-25"});assert.equal(init.status,200);assert.equal((await init.json()).result.serverInfo.version,"0.6.0");
+const list=await post("/mcp","tools/list");assert.equal(list.status,200);assert.deepEqual((await list.json()).result.tools.map(t=>t.name),["server_status"]);
+assert.equal((await post("/mcp-private","tools/list")).status,404);
+assert.equal((await request("/.well-known/oauth-authorization-server")).status,404);
+console.log("LIVE PREVIEW SMOKE PASS: deployment b9159ddf-d6f9-48c0-8e7b-90046df4528b commit 4564b8b, version "+h.version+", no D1/KV, private MCP and OAuth fail closed.");

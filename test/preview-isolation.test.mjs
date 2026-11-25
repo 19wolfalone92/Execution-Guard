@@ -7,6 +7,8 @@ import worker from "../worker.mjs";
 test("initial Cloudflare preview is explicitly storage-isolated and OAuth disabled",()=>{
   const config=JSON.parse(readFileSync(new URL("../wrangler.jsonc",import.meta.url),"utf8"));
   assert.equal(config.previews.vars.EG_AUTH_ENABLED,"false");
+  assert.equal(config.previews.vars.EG_ENVIRONMENT,"preview");
+  assert.equal(config.previews.vars.EG_PREVIEW_READY,"false");
   assert.deepEqual(config.previews.d1_databases,[]);
   assert.deepEqual(config.previews.kv_namespaces,[]);
   assert.equal(config.previews.triggers,undefined);

@@ -8,7 +8,9 @@ import { Miniflare, createFetchMock } from "miniflare";
 const config=JSON.parse(readFileSync("wrangler.jsonc","utf8"));
 const script=readdirSync(".oauth-build").filter(x=>/\.(m?js)$/.test(x));
 assert.equal(script.length,1,"Expected one bundled Worker entry point");
-const host="https://execution-guard.19wolf-alone92.workers.dev";
+const preview=process.env.EG_TEST_PREVIEW==="1";
+const host=preview?"https://audit-oauth-e2e-20261125-execution-guard.19wolf-alone92.workers.dev":"https://execution-guard.19wolf-alone92.workers.dev";
+const testTickSecret="qualification-only-test-secret-0123456789";
 const resource=host+"/mcp-private";
 const redirect="https://chatgpt.com/connector_platform_oauth_redirect";
 const owner="123456";
@@ -24,7 +26,7 @@ const options=scriptPath=>({
   // This is a test-only cap; production Wrangler configuration is unchanged.
   compatibilityDate:config.compatibility_date>"2026-08-06"?"2026-08-06":config.compatibility_date,
   compatibilityFlags:config.compatibility_flags,
-  bindings:{EG_AUTH_ENABLED:"true",EG_OWNER_GITHUB_ID:owner,GITHUB_CLIENT_ID:"qualification-client",GITHUB_CLIENT_SECRET:"qualification-secret"},
+  bindings:{EG_AUTH_ENABLED:"true",EG_OWNER_GITHUB_ID:owner,GITHUB_CLIENT_ID:"qualification-client",GITHUB_CLIENT_SECRET:"qualification-secret",...(preview?{EG_ENVIRONMENT:"preview",EG_PREVIEW_READY:"true",EG_PREVIEW_TICK_SECRET:testTickSecret}:{})},
   kvNamespaces:["OAUTH_KV"],d1Databases:["DB"],fetchMock:mock,cf:false
 });
 let mf=new Miniflare(options(baselinePath||candidatePath));
@@ -43,9 +45,12 @@ function cookies(response,jar=new Map()){
 }
 const cookieHeader=jar=>Array.from(jar,([k,v])=>k+"="+v).join("; ");
 async function json(response){const body=await response.text();assert.match(response.headers.get("Content-Type")||"",/json/i,"Expected JSON, status "+response.status);return JSON.parse(body);}
+async function tick(){
+  if(preview){const r=await call("/qualification/tick",{method:"POST",headers:{Authorization:"Bearer "+testTickSecret}});assert.equal(r.status,200,await r.clone().text());}
+  else await (await mf.getWorker()).scheduled({cron:"*/5 * * * *"});
+}
 async function provision(){
-  const worker=await mf.getWorker();
-  await worker.scheduled({cron:"*/5 * * * *"});
+  await tick();
   for(let i=0;i<50;i++){const r=await call("/oauth/client-info");const b=await json(r);if(b.status==="ready"){ok(r.status===200&&b.redirect_uri===redirect&&b.token_endpoint_auth_method==="none"&&typeof b.client_id==="string","registered public client");return b.client_id;}await new Promise(resolve=>setTimeout(resolve,100));}
   assert.fail("Scheduled provisioning did not produce a client");
 }
@@ -97,6 +102,8 @@ async function rpc(access,method,params={}){
 async function tool(access,name,args={}){return rpc(access,"tools/call",{name,arguments:args});}
 const value=r=>JSON.parse(r.content[0].text);
 try{
+  const deniedTick=await call("/qualification/tick",{method:"POST"});
+  ok(deniedTick.status===(preview?403:404),"qualification tick denied without separate secret or outside Preview");
   const meta=await json(await call("/.well-known/oauth-authorization-server"));
   ok(meta.issuer===host&&meta.authorization_endpoint===host+"/authorize"&&meta.token_endpoint===host+"/oauth/token"&&meta.authorization_response_iss_parameter_supported===true&&meta.code_challenge_methods_supported.includes("S256")&&meta.token_endpoint_auth_methods_supported.includes("none"),"authorization metadata, issuer and S256");
   const resMeta=await json(await call("/.well-known/oauth-protected-resource/mcp-private"));
@@ -137,7 +144,7 @@ try{
   const conflict=await tool(tokens.access_token,"checkpoint_put",{project:"qualification",expected_revision:0,value:"wrong"});ok(conflict.isError&&value(conflict).status==="conflict","checkpoint revision conflict rejected");
   const queued=value(await tool(tokens.access_token,"task_submit",{project:"qualification",idempotency_key:"qualification1",kind:"sha256_verify",payload:{text:"proof",expected_sha256:createHash("sha256").update("proof").digest("hex")}}));
   ok(queued.state==="queued","durable task submitted");
-  await (await mf.getWorker()).scheduled({cron:"*/5 * * * *"});
+  await tick();
   let final;
   for(let i=0;i<50;i++){final=value(await tool(tokens.access_token,"task_status",{project:"qualification",task_id:queued.task_id}));if(final.state==="succeeded")break;await new Promise(resolve=>setTimeout(resolve,100));}
 ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task completed and result verified");
@@ -234,7 +241,7 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
 }finally{await mf.dispose();await mock.close();rmSync(persistence,{recursive:true,force:true});}
 
 /* Independent production smoke, read-only, no OAuth secrets or issued tokens. */
-try {
+if(!preview)try {
   const live=(path,opts={})=>fetch(host+path,{...opts,redirect:"manual",signal:AbortSignal.timeout(12000)});
   const healthResponse=await live("/health");assert.equal(healthResponse.status,200);
   const health=await healthResponse.json();

@@ -1,4 +1,4 @@
-import { isOwner, READ, WRITE, HOST } from "./security.mjs";
+import { isOwner, READ, WRITE, authHost } from "./security.mjs";
 import { taskSubmit, taskStatus, taskCancel } from "./tasks.mjs";
 import {
   projectCreate, projectGet, projectUpdate, projectHistory, projectResume,
@@ -66,9 +66,9 @@ const tools = [
 function json(value, status=200) { return Response.json(value,{status,headers:{"Cache-Control":"no-store"}}); }
 function validArgs(args,keys) {return args && typeof args==="object" && !Array.isArray(args) && Object.keys(args).length===keys.length && keys.every(k=>Object.hasOwn(args,k));}
 function containsSecret(value) {return typeof value==="string" && /(?:gh[pousr]_[A-Za-z0-9_]{20,}|Bearer\s+[A-Za-z0-9._~-]{20,}|-----BEGIN (?:RSA|OPENSSH|EC) PRIVATE KEY-----|AKIA[0-9A-Z]{16})/.test(value);}
-function writeChallenge(description) {
+function writeChallenge(description,env) {
   return {"mcp/www_authenticate":[
-    "Bearer resource_metadata=\""+HOST+"/.well-known/oauth-protected-resource/mcp-private\", error=\"insufficient_scope\", error_description=\""+description+"\", scope=\""+READ+" "+WRITE+"\""
+    "Bearer resource_metadata=\"" +authHost(env)+"/.well-known/oauth-protected-resource/mcp-private\", error=\"insufficient_scope\", error_description=\""+description+"\", scope=\""+READ+" "+WRITE+"\""
   ]};
 }
 const writeNames = new Set(["task_submit","task_cancel","checkpoint_put","project_create","project_update","workflow_create","workflow_start","workflow_pause","workflow_resume","workflow_cancel","workflow_retry"]);
@@ -94,7 +94,7 @@ const handlers = {
 export async function privateFetch(request,env,ctx) {
   if (!isOwner(env,ctx)) return json({error:"forbidden"},403);
   const origin=request.headers.get("Origin");
-  if (origin && ![HOST,"https://chatgpt.com","https://www.chatgpt.com"].includes(origin)) return json({error:"forbidden"},403);
+  if (origin && ![authHost(env),"https://chatgpt.com","https://www.chatgpt.com"].includes(origin)) return json({error:"forbidden"},403);
   if (!ctx.auth.scope.includes(READ)) return json({error:"insufficient_scope"},403);
   if (request.method!=="POST") return new Response(null,{status:405,headers:{Allow:"POST","Cache-Control":"no-store"}});
   const length=Number(request.headers.get("Content-Length"));
@@ -120,12 +120,12 @@ export async function privateFetch(request,env,ctx) {
   const name=m.params?.name,args=m.params?.arguments??{},owner=ctx.props.userId;
   if(name==="whoami"){if(!validArgs(args,[]))return rpcError(-32602,"Invalid arguments");return result({authenticated:true,owner_verified:true,scopes:ctx.auth.scope});}
   if(["task_submit","task_status","task_cancel"].includes(name)){
-    if(name!=="task_status"&&!ctx.auth.scope.includes(WRITE))return reply({isError:true,content:[{type:"text",text:"Write scope required"}],_meta:writeChallenge("Task write scope required")});
+    if(name!=="task_status"&&!ctx.auth.scope.includes(WRITE))return reply({isError:true,content:[{type:"text",text:"Write scope required"}],_meta:writeChallenge("Task write scope required",env)});
     try{const fn={task_submit:taskSubmit,task_status:taskStatus,task_cancel:taskCancel}[name];const r=await fn(env.DB,owner,args);return result(r,!!r.error);}catch{return result({error:"storage_error"},true);}
   }
   if(name==="checkpoint_get"||name==="checkpoint_put"){
     const write=name==="checkpoint_put";
-    if(write&&!ctx.auth.scope.includes(WRITE))return reply({isError:true,content:[{type:"text",text:"Write scope required"}],_meta:writeChallenge("Checkpoint write scope required")});
+    if(write&&!ctx.auth.scope.includes(WRITE))return reply({isError:true,content:[{type:"text",text:"Write scope required"}],_meta:writeChallenge("Checkpoint write scope required",env)});
     if(!validArgs(args,write?["project","expected_revision","value"]:["project"])||typeof args.project!=="string"||!projectPattern.test(args.project))return rpcError(-32602,"Invalid arguments");
     if(write&&(!Number.isInteger(args.expected_revision)||args.expected_revision<0||args.expected_revision>2147483646||typeof args.value!=="string"||new TextEncoder().encode(args.value).length>8192||containsSecret(args.value)))return rpcError(-32602,"Invalid revision or value");
     try {
@@ -144,7 +144,7 @@ export async function privateFetch(request,env,ctx) {
       return result({status:"saved",project:args.project,revision:args.expected_revision+1,updated_at:now});
     }catch{return result({status:"storage_error"},true);}
   }
-  if(writeNames.has(name)&&!ctx.auth.scope.includes(WRITE))return reply({isError:true,content:[{type:"text",text:"Write scope required"}],_meta:writeChallenge("Project or workflow write scope required")});
+  if(writeNames.has(name)&&!ctx.auth.scope.includes(WRITE))return reply({isError:true,content:[{type:"text",text:"Write scope required"}],_meta:writeChallenge("Project or workflow write scope required",env)});
   if(Object.hasOwn(handlers,name)){
     try{const r=await handlers[name](env.DB,owner,args);return result(r,!!r.error);}catch{return result({error:"execution_error"},true);}
   }
