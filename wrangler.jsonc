@@ -1,0 +1,13 @@
+{
+  "name": "execution-guard",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-25",
+  "keep_vars": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "execution-guard-db",
+      "database_id": "e7699170-b634-48ce-a3b0-733aedb9b898"
+    }
+  ]
+}
