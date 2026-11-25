@@ -1,0 +1,52 @@
+name: D1 management permission probe
+on:
+  push:
+    branches: [diagnostics/d1-management-permission-20261125]
+    paths: ['.github/workflows/d1-management-permission-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.repository == '19wolfalone92/Execution-Guard' && github.ref == 'refs/heads/diagnostics/d1-management-permission-20261125'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Check existing token on isolated Preview schema-only export
+        env:
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_MANAGEMENT: ${{ secrets.CLOUDFLARE_MANAGEMENT_TOKEN }}
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          const account=process.env.CF_ACCOUNT, token=process.env.CF_MANAGEMENT;
+          const preview='657131f8-b0f4-47f3-ab3d-91840843f2db';
+          const out={token_present:!!token,account_matches:account==='04b45c9393f4e12159c6b8118ec54791',target:'isolated_preview',schema_only:true};
+          const root='https://api.cloudflare.com/client/v4';
+          async function api(path,body){
+            const r=await fetch(root+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),redirect:'error',signal:AbortSignal.timeout(15000)});
+            const j=await r.json().catch(()=>null);
+            return {http:r.status,ok:r.ok&&j?.success===true,errors:(j?.errors||[]).map(e=>e.code).filter(Number.isInteger),result:j?.result};
+          }
+          try{
+            if(!out.token_present||!out.account_matches)throw Error('configuration');
+            const verified=await api('/user/tokens/verify');
+            out.token_verify={http:verified.http,ok:verified.ok,active:verified.result?.status==='active'};
+            const path='/accounts/'+account+'/d1/database/'+preview;
+            const meta=await api(path);
+            out.preview_identity={http:meta.http,ok:meta.ok,matched:(meta.result?.uuid||meta.result?.id)===preview&&meta.result?.name==='execution-guard-preview-db'};
+            if(!out.preview_identity.matched)throw Error('preview_identity');
+            let bookmark;
+            for(let i=0;i<15;i++){
+              const r=await api(path+'/export',{output_format:'polling',dump_options:{no_data:true},...(bookmark?{current_bookmark:bookmark}:{})});
+              out.export={http:r.http,ok:r.ok,error_codes:r.errors,completed:r.result?.status==='complete',server_error:r.result?.status==='error'};
+              if(!r.ok||out.export.server_error||out.export.completed)break;
+              bookmark=r.result?.at_bookmark;
+              if(!bookmark)break;
+              await new Promise(r=>setTimeout(r,2000));
+            }
+            out.status=out.export?.ok&&out.export.completed?'PASS':out.export?.http===403||out.export?.http===401?'DENIED':'UNVERIFIED';
+          }catch{out.status='UNVERIFIED';}
+          console.log('EG_D1_PERMISSION '+JSON.stringify(out));
+          if(out.status!=='PASS')process.exitCode=1;
+          JS
