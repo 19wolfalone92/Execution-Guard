@@ -31,7 +31,18 @@
       "EG_ENVIRONMENT": "preview",
       "EG_PREVIEW_READY": "false"
     },
-    "d1_databases": [],
-    "kv_namespaces": []
+    "d1_databases": [
+      {
+        "binding": "DB",
+        "database_name": "execution-guard-preview-db",
+        "database_id": "657131f8-b0f4-47f3-ab3d-91840843f2db"
+      }
+    ],
+    "kv_namespaces": [
+      {
+        "binding": "OAUTH_KV",
+        "id": "25a30c61f53b422fa11889babb147fd4"
+      }
+    ]
   }
 }

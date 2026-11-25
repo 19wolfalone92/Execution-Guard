@@ -36,9 +36,15 @@ assert.equal((await post("/qualification/tick","ping")).status,404);
 console.log("LIVE PREVIEW HTTP GUARD PASS: "+deployment+" "+sha+"; binding identity still requires account verification.");
 // Keep resource isolation a separate explicit gate. A guard is not proof
 // that a binding is absent or points to a separate database.
-assert.equal(h.storage_guard.d1_binding_present,enabled,"Unexpected D1 binding; inspect Previews Base");
-assert.equal(h.storage_guard.kv_binding_present,enabled,"Unexpected KV binding; inspect Previews Base");
-if(!enabled)console.log("LIVE PREVIEW EMPTY BINDINGS PASS");
+assert.equal(h.storage_guard.d1_binding_present,config.previews.d1_databases.length===1,"Unexpected D1 binding; inspect Previews Base");
+assert.equal(h.storage_guard.kv_binding_present,config.previews.kv_namespaces.length===1,"Unexpected KV binding; inspect Previews Base");
+if(!enabled){
+  const stable="https://audit-oauth-e2e-20261125-execution-guard.19wolf-alone92.workers.dev";
+  const r=await fetch(stable+"/health",{redirect:"manual",signal:AbortSignal.timeout(15000)});
+  assert.equal(r.status,200);const state=await r.json();
+  assert.equal(state.version,"0.6.0");assert.equal(state.storage_guard?.state,"blocked");assert.equal(state.database,"not_verified");assert.equal(state.oauth.configuration,"disabled");
+  console.log("LIVE PREVIEW STAGED BINDING PRESENCE AND DISABLED AUTH PASS; resource identity and markers require account confirmation");
+}
 else{
   const stable="https://audit-oauth-e2e-20261125-execution-guard.19wolf-alone92.workers.dev";
   const r=await fetch(stable+"/health",{redirect:"manual",signal:AbortSignal.timeout(15000)});
