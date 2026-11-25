@@ -8,7 +8,6 @@ const shaPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const secretKeyPattern = /(?:token|secret|password|credential|private.?key|authorization|cookie)/i;
 const projectFields = new Set(["goal","rules","repository","branch","commit","pull_request","stage","completed","pending","errors","tests","limitations","next_action","evidence"]);
 const operations = new Set(["health_probe","sha256_verify","github_repository_status","github_commit_status","github_workflow_status"]);
-const terminalStates = new Set(["SUCCEEDED","FAILED","CANCELLED"]);
 const nowIso = () => new Date().toISOString();
 const bytes = value => new TextEncoder().encode(value).length;
 const isObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -31,6 +30,7 @@ async function ensureSchema(db) {
 function scanForSecrets(value, depth = 0) {
   if (depth > 8) return false;
   if (Array.isArray(value)) return value.every(item => scanForSecrets(item,depth+1));
+  if (typeof value === "string") return !/(?:gh[pousr]_[A-Za-z0-9_]{20,}|Bearer\\s+[A-Za-z0-9._~-]{20,}|sk-[A-Za-z0-9]{20,})/.test(value);
   if (!isObject(value)) return true;
   for (const [key,item] of Object.entries(value)) {
     if (secretKeyPattern.test(key) || !scanForSecrets(item,depth+1)) return false;
@@ -337,7 +337,7 @@ export async function githubRepositoryStatus(args, fetcher=fetch) {
   if(!allKeys(args,["owner","repo"])||!repoPartPattern.test(args.owner)||!repoPartPattern.test(args.repo))return {error:"invalid_arguments"};
   try {
     const data=await githubJson("/repos/"+encodeURIComponent(args.owner)+"/"+encodeURIComponent(args.repo),15000,fetcher);
-    return {verified:typeof data.full_name==="string"&&typeof data.default_branch==="string",repository:{id:data.id,full_name:data.full_name,private:Boolean(data.private),archived:Boolean(data.archived),default_branch:data.default_branch,updated_at:data.updated_at},checked_at:nowIso(),source:"GitHub public REST API"};
+    return {verified:typeof data.full_name==="string"&&data.full_name.toLowerCase()===(args.owner+"/"+args.repo).toLowerCase()&&typeof data.default_branch==="string",repository:{id:data.id,full_name:data.full_name,private:Boolean(data.private),archived:Boolean(data.archived),default_branch:data.default_branch,updated_at:data.updated_at},checked_at:nowIso(),source:"GitHub public REST API"};
   } catch(error) {return {error:error.code||error.message,retryable:error instanceof RetryableError};}
 }
 
