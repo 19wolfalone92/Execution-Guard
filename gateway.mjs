@@ -1,7 +1,8 @@
 import { OAuthProvider, AuthorizationError } from "@cloudflare/workers-oauth-provider";
 import publicWorker from "./worker.mjs";
-import { HOST, RESOURCE, READ, WRITE, CLIENT, consentHtml, s256, gatewayRoute } from "./security.mjs";
+import { HOST, RESOURCE, READ, WRITE, CLIENT, consentHtml, s256, gatewayRoute, configured } from "./security.mjs";
 import { privateFetch } from "./private.mjs";
+import { runBatch } from "./tasks.mjs";
 
 const callbackUrl=HOST+"/callback";
 const defaultHandler={async fetch(request,env) {
@@ -52,4 +53,7 @@ const defaultHandler={async fetch(request,env) {
   }
 }};
 const provider=new OAuthProvider({apiRoute:"/mcp-private",apiHandler:{fetch:privateFetch},defaultHandler,authorizeEndpoint:"/authorize",tokenEndpoint:"/oauth/token",scopesSupported:[READ,WRITE],requiredScopes:[READ],resourceMetadata:{resource:RESOURCE,authorization_servers:[HOST]},clientIdMetadataDocumentEnabled:true});
-export default gatewayRoute(publicWorker,provider);
+const gateway=gatewayRoute(publicWorker,provider);
+export default {...gateway,async scheduled(_event,env,ctx){
+  if(configured(env))ctx.waitUntil(runBatch(env.DB,env.EG_OWNER_GITHUB_ID));
+}};

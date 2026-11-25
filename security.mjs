@@ -16,7 +16,7 @@ export function escapeHtml(value) {
 }
 export function consentHtml(details, handle) {
   const e = escapeHtml;
-  return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Execution Guard consent</title><h1>Execution Guard</h1><p>Client: '+e(details.clientName)+'</p><p>Verified domain: '+e(details.clientDomain || 'not verified')+'</p><p>Redirect host: '+e(details.redirectHost)+'</p><p>Scopes: '+e(details.scope.join(', '))+'</p><p>Sign in with the configured GitHub owner. Read and write project checkpoints only; no repository access is requested.</p><form method="post"><input type="hidden" name="handle" value="'+e(handle)+'"><button name="decision" value="approve">Continue to GitHub</button><button name="decision" value="deny">Deny</button></form></html>';
+  return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Execution Guard consent</title><h1>Execution Guard</h1><p>Client: '+e(details.clientName)+'</p><p>Verified domain: '+e(details.clientDomain || 'not verified')+'</p><p>Redirect host: '+e(details.redirectHost)+'</p><p>Scopes: '+e(details.scope.join(', '))+'</p><p>Sign in with the configured GitHub owner. Read and write project checkpoints and bounded diagnostic tasks; no repository access is requested.</p><form method="post"><input type="hidden" name="handle" value="'+e(handle)+'"><button name="decision" value="approve">Continue to GitHub</button><button name="decision" value="deny">Deny</button></form></html>';
 }
 export async function s256(value) {
   const digest = await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value));
