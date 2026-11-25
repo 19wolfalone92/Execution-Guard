@@ -1,5 +1,5 @@
 const VERSION = "0.5.0";
-async function status(env) {
+async function status(env, diagnose) {
   let database = "not_verified";
   let persistence_probe = "not_verified";
   if (env?.DB) {
@@ -25,15 +25,16 @@ async function status(env) {
     database,
     persistence_probe,
     oauth_storage: typeof env?.OAUTH_KV?.get === "function" ? "bound" : "not_bound",
+    ...(diagnose ? {oauth:await diagnose()} : {}),
     timestamp: new Date().toISOString()
   };
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx, diagnose) {
     const url = new URL(request.url);
     if (url.pathname === "/" || url.pathname === "/health") {
-      return Response.json(await status(env));
+      return Response.json(await status(env, diagnose));
     }
     if (url.pathname !== "/mcp") {
       return new Response("Not found", { status: 404 });
@@ -73,7 +74,7 @@ export default {
         if (msg.params?.name !== "server_status") return error(-32602,"Unknown tool");
         const args = msg.params?.arguments ?? {};
         if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).length) return error(-32602,"No arguments expected");
-        return reply({content:[{type:"text",text:JSON.stringify(await status(env))}]});
+        return reply({content:[{type:"text",text:JSON.stringify(await status(env, diagnose))}]});
       }
       default: return error(-32601,"Method not found");
     }
