@@ -151,7 +151,7 @@ export async function privateFetch(request,env,ctx) {
     try{
       const fn={github_repository_status:githubRepositoryStatus,github_commit_status:githubCommitStatus,github_workflow_status:githubWorkflowStatus}[name];
       const r=await fn(args);
-      return result(r,!!r.error||r.verified===false);
+      return result(r,!!r.error);
     }catch{return result({error:"github_read_failed"},true);}
   }
   return rpcError(-32602,"Unknown tool");
