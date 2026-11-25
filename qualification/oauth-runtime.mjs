@@ -22,6 +22,8 @@ const mf=new Miniflare({
   bindings:{EG_AUTH_ENABLED:"true",EG_OWNER_GITHUB_ID:owner,GITHUB_CLIENT_ID:"qualification-client",GITHUB_CLIENT_SECRET:"qualification-secret"},
   kvNamespaces:["OAUTH_KV"],d1Databases:["DB"],fetchMock:mock,cf:false
 });
+const testDb=await mf.getD1Database("DB");
+await testDb.exec(readFileSync("probe.sql","utf8"));
 let checks=0;
 function ok(condition,label){assert.ok(condition,label);checks++;console.log("PASS "+label);}
 const sha=v=>createHash("sha256").update(v).digest("base64url");
