@@ -445,8 +445,8 @@ export async function runWorkflowBatch(db, owner, limit=4, fetcher=fetch, now=Da
     }
     if(!candidate)break;
     const lease=crypto.randomUUID(),started=nowIso();
-    const claimed=await db.prepare("UPDATE eg_workflow_steps SET state='RUNNING',attempts=attempts+1,lease_id=?,lease_until=?,updated_at=?,error_code=NULL WHERE id=? AND owner=? AND state IN ('QUEUED','RETRYING') AND available_at<=? RETURNING id,workflow_id,project,step_key,operation,input,depends_on,attempts,max_attempts,timeout_ms")
-      .bind(lease,now+candidate.step.timeout_ms+30000,started,candidate.step.id,owner,now).first();
+    const claimed=await db.prepare("UPDATE eg_workflow_steps SET state='RUNNING',attempts=attempts+1,lease_id=?,lease_until=?,updated_at=?,error_code=NULL WHERE id=? AND owner=? AND state IN ('QUEUED','RETRYING') AND available_at<=? AND (SELECT COUNT(*) FROM eg_workflow_steps WHERE state='RUNNING' AND lease_until>?)<16 AND (SELECT COUNT(*) FROM eg_workflow_steps WHERE owner=? AND state='RUNNING' AND lease_until>?)<4 RETURNING id,workflow_id,project,step_key,operation,input,depends_on,attempts,max_attempts,timeout_ms")
+      .bind(lease,now+candidate.step.timeout_ms+30000,started,candidate.step.id,owner,now,now,owner,now).first();
     if(!claimed)continue;
     await db.prepare("UPDATE eg_workflows SET state='RUNNING',updated_at=? WHERE id=? AND owner=? AND state IN ('QUEUED','RETRYING','BLOCKED','RUNNING')").bind(started,claimed.workflow_id,owner).run();
     let result=null,transient=false,errorCode=null,delay=0;
