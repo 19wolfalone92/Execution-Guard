@@ -32,7 +32,7 @@ try{
  if(buildId){
    const logs=await cf("/builds/builds/"+buildId+"/logs",management);
    const raw=JSON.stringify(logs.result||"");
-   out.automatic_build.logs={http:logs.http,ok:logs.ok,errors:logs.errors,authentication_error:/Authentication error/i.test(raw),authorization_error:/Authorization error/i.test(raw),permission_error:/not authorized|insufficient permission|permission denied/i.test(raw),codes:[...new Set([...raw.matchAll(/\[code:\s*(\d+)\]/g)].map(x=>Number(x[1])))],missing_previews:/missing a.*previews/i.test(raw),quota:/quota|limit exceeded|too many/i.test(raw)};
+   out.automatic_build.logs={http:logs.http,ok:logs.ok,errors:logs.errors,authentication_error:/Authentication error/i.test(raw),authorization_error:/Authorization error/i.test(raw),permission_error:/not authorized|insufficient permission|permission denied/i.test(raw),codes:[...new Set([...raw.matchAll(/\[code:\s*(\d+)\]/g)].map(x=>Number(x[1])))],missing_previews:/missing a.*previews/i.test(raw),quota:/quota|limit exceeded|too many/i.test(raw),rate_limited:/rate.limit|retry_after_ms|10429/i.test(raw)};
  }
  // Deploy only the isolated named Preview, with exact checked-out SHA in its runtime vars.
  config.previews.vars.EG_RELEASE_SHA=sha;writeFileSync("wrangler.jsonc",JSON.stringify(config,null,2)+"\n");

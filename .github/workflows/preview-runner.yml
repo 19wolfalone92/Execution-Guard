@@ -1,5 +1,6 @@
 name: Preview remote scheduler qualification
 on:
+  workflow_dispatch:
   push:
     branches: [audit/oauth-e2e-20261125]
     paths: ['qualification/preview-runner.mjs', '.github/workflows/preview-runner.yml']
@@ -9,7 +10,7 @@ jobs:
   runner:
     if: github.repository == '19wolfalone92/Execution-Guard' && github.ref == 'refs/heads/audit/oauth-e2e-20261125'
     runs-on: ubuntu-latest
-    timeout-minutes: 16
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v7
         with:

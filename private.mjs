@@ -1,10 +1,10 @@
-import { isOwner, READ, WRITE, authHost } from "./security.mjs";
+import { isOwner, READ, WRITE, authHost, PREVIEW_HOST, previewStorageReady } from "./security.mjs";
 import { taskSubmit, taskStatus, taskCancel } from "./tasks.mjs";
 import {
   projectCreate, projectGet, projectUpdate, projectHistory, projectResume,
   workflowCreate, workflowStart, workflowStatus, workflowPause, workflowResume,
   workflowCancel, workflowRetry, workflowDependenciesGet, taskEvidenceGet,
-  executionAudit, executionFinalize, systemHealth,
+  executionAudit, executionFinalize, systemHealth, runWorkflowBatch,
   githubRepositoryStatus, githubCommitStatus, githubWorkflowStatus
 } from "./orchestrator.mjs";
 
@@ -115,6 +115,23 @@ export async function privateFetch(request,env,ctx) {
     return reply({protocolVersion:versions.includes(v)?v:"2026-07-28",capabilities:{tools:{}},serverInfo:{name:"execution-guard-private",version:"0.6.0"}});
   }
   if(m.method==="ping")return reply({});
+  // Preview has no Cron. The authenticated owner can advance an already
+  // persisted qualification session without sharing the administrator tick secret.
+  // This is a test-only RPC, not a public endpoint or a 27th MCP tool.
+  if(m.method==="qualification/tick"){
+    if(env.EG_ENVIRONMENT!=="preview"||env.EG_PREVIEW_BROWSER_QUALIFICATION!=="true"||new URL(request.url).origin!==PREVIEW_HOST)return rpcError(-32601,"Method not found");
+    if(!ctx.auth.scope.includes(WRITE))return rpcError(-32602,"Write scope required");
+    const key=m.params?.proof_project;
+    if(!validArgs(m.params,["proof_project"])||typeof key!=="string"||!/^eg-qualification-browser-[a-f0-9-]{36}-p$/.test(key))return rpcError(-32602,"Invalid qualification project");
+    try{
+      if(!await previewStorageReady(env))return rpcError(-32603,"Preview storage not qualified");
+      const row=await env.DB.prepare("SELECT value FROM eg_checkpoints WHERE owner=? AND project=?").bind(ctx.props.userId,key).first();
+      const proof=row?JSON.parse(row.value):null;
+      if(!proof||proof.proof_project!==key||proof.project!==key.slice(0,-2)||proof.sha!==env.EG_RELEASE_SHA||proof.state!=="QUEUED"||proof.owner_verified!==true||!/^([a-f0-9-]{36})$/.test(proof.workflow_id||"")||!/^([a-f0-9-]{36})$/.test(proof.control_id||""))return rpcError(-32602,"No queued qualification session");
+      const result=await runWorkflowBatch(env.DB,ctx.props.userId,1);
+      return reply({environment:"preview",executed:result.executed});
+    }catch{return rpcError(-32603,"Qualification tick failed");}
+  }
   if(m.method==="tools/list")return reply({tools});
   if(m.method!=="tools/call")return rpcError(-32601,"Method not found");
   const name=m.params?.name,args=m.params?.arguments??{},owner=ctx.props.userId;

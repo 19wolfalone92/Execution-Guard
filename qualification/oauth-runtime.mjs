@@ -26,7 +26,7 @@ const options=scriptPath=>({
   // This is a test-only cap; production Wrangler configuration is unchanged.
   compatibilityDate:config.compatibility_date>"2026-08-06"?"2026-08-06":config.compatibility_date,
   compatibilityFlags:config.compatibility_flags,
-  bindings:{EG_AUTH_ENABLED:"true",EG_OWNER_GITHUB_ID:owner,GITHUB_CLIENT_ID:"qualification-client",GITHUB_CLIENT_SECRET:"qualification-secret",...(preview?{EG_ENVIRONMENT:"preview",EG_PREVIEW_READY:"true",EG_PREVIEW_TICK_SECRET:testTickSecret,EG_PREVIEW_BROWSER_QUALIFICATION:"true"}:{})},
+  bindings:{EG_AUTH_ENABLED:"true",EG_OWNER_GITHUB_ID:owner,GITHUB_CLIENT_ID:"qualification-client",GITHUB_CLIENT_SECRET:"qualification-secret",...(preview?{EG_ENVIRONMENT:"preview",EG_PREVIEW_READY:"true",EG_PREVIEW_TICK_SECRET:testTickSecret,EG_PREVIEW_BROWSER_QUALIFICATION:"true",EG_RELEASE_SHA:"b".repeat(40)}:{})},
   kvNamespaces:["OAUTH_KV"],d1Databases:["DB"],fetchMock:mock,cf:false
 });
 let mf=new Miniflare(options(baselinePath||candidatePath));
@@ -150,6 +150,19 @@ try{
   const legacyTools=await rpc(tokens.access_token,"tools/list");ok(["whoami","checkpoint_get","checkpoint_put","task_submit","task_status","task_cancel"].every(x=>legacyTools.tools.some(t=>t.name===x)),"legacy MCP tools discovered");
   const latestInit=await rpc(tokens.access_token,"initialize",{protocolVersion:"2026-07-28",capabilities:{},clientInfo:{name:"qualification-latest",version:"1"}});ok(latestInit.protocolVersion==="2026-07-28","latest supported MCP protocol version");
   const who=value(await tool(tokens.access_token,"whoami"));ok(who.authenticated&&who.owner_verified&&who.scopes.includes("eg:write"),"authenticated owner and scope");
+  const tickRequest=access=>call("/mcp-private",{method:"POST",headers:{"Content-Type":"application/json",...(access?{Authorization:"Bearer "+access}:{})},body:JSON.stringify({jsonrpc:"2.0",id:1009,method:"qualification/tick",params:{proof_project:"eg-qualification-browser-00000000-0000-4000-8000-000000000001-p"}})});
+  ok((await tickRequest(null)).status===401,"owner qualification tick rejects no token");
+  const noSession=await json(await tickRequest(tokens.access_token));ok(!!noSession.error,"owner qualification tick rejects missing session or production");
+  if(preview){
+    const project="eg-qualification-browser-00000000-0000-4000-8000-000000000001",proof_project=project+"-p";
+    const w=value(await tool(tokens.access_token,"workflow_create",{project,name:"owner tick test",idempotency_key:"owner-tick-test",steps:[{key:"health",operation:"health_probe",input:{}}]}));
+    ok(w.status==="created","owner tick fixture created");const ref={project,workflow_id:w.workflow_id};
+    ok(value(await tool(tokens.access_token,"workflow_start",ref)).status==="started","owner tick fixture queued");
+    const proof={project,proof_project,sha:"b".repeat(40),state:"QUEUED",owner_verified:true,workflow_id:w.workflow_id,control_id:w.workflow_id};
+    ok(value(await tool(tokens.access_token,"checkpoint_put",{project:proof_project,expected_revision:0,value:JSON.stringify(proof)})).status==="saved","owner tick session persisted");
+    const progressed=await json(await tickRequest(tokens.access_token));ok(progressed.result?.environment==="preview"&&progressed.result.executed===1,"owner-scoped bounded tick executes existing scheduler");
+    ok(value(await tool(tokens.access_token,"workflow_status",ref)).workflow.state==="SUCCEEDED","owner tick workflow persisted");
+  }
   const saved=value(await tool(tokens.access_token,"checkpoint_put",{project:"qualification",expected_revision:0,value:"proof"}));ok(saved.status==="saved"&&saved.revision===1,"D1 checkpoint write");
   const got=value(await tool(tokens.access_token,"checkpoint_get",{project:"qualification"}));ok(got.found&&got.value==="proof"&&got.revision===1,"D1 checkpoint readback");
   const conflict=await tool(tokens.access_token,"checkpoint_put",{project:"qualification",expected_revision:0,value:"wrong"});ok(conflict.isError&&value(conflict).status==="conflict","checkpoint revision conflict rejected");
@@ -281,6 +294,7 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
   ok(revoked.status===401,"replay revokes previously issued tokens");
   const readOnly=await issue("eg:read");const readTokenResponse=await exchange(readOnly.code);assert.equal(readTokenResponse.status,200,await readTokenResponse.clone().text());const readTokens=await json(readTokenResponse);
   ok(value(await tool(readTokens.access_token,"checkpoint_get",{project:"qualification"})).found,"read-only scope permits read");
+  const readonlyTick=await json(await tickRequest(readTokens.access_token));ok(!!readonlyTick.error,"qualification tick rejects read-only token");
   const blocked=await tool(readTokens.access_token,"checkpoint_put",{project:"qualification",expected_revision:1,value:"forbidden"});
   ok(blocked.isError===true,"read-only scope cannot write");
   const unchanged=value(await tool(readTokens.access_token,"checkpoint_get",{project:"qualification"}));ok(unchanged.value==="proof"&&unchanged.revision===1,"scope denial leaves data unchanged");
