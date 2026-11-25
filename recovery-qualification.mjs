@@ -3,7 +3,7 @@
 import {createHash} from "node:crypto";
 import {projectCreate,projectGet,projectUpdate,projectHistory,projectResume,workflowCreate,workflowStart,workflowStatus,workflowCancel,runWorkflowBatch,executionFinalize} from "./orchestrator.mjs";
 import {taskSubmit,taskStatus} from "./tasks.mjs";
-const cases=new Set(["lease","concurrent","429","503","timeout","backoff","exhaust","dependency","cancel_running","cancel_queued","tamper","memory"]);
+const cases=new Set(["lease","concurrent","429","503","timeout","backoff","exhaust","dependency","cancel_running","cancel_queued","tamper","memory","stale"]);
 const hash=s=>createHash("sha256").update(s).digest("hex");
 const target={owner:"octo",repo:"repo"};
 const okFetch=async()=>Response.json({id:7,full_name:"octo/repo",default_branch:"main",private:false,archived:false});
@@ -13,7 +13,7 @@ export async function recoveryQualification(db,params){
  const owner="eg-recovery-fixture-"+id,project="eg-recovery-"+id,ref={project};
  const result={scenario,phase,id,project,environment:"preview",synthetic_identity:true,external_faults:"simulated",checked_at:new Date().toISOString(),checks:{}};
  const check=(k,v)=>{result.checks[k]=Boolean(v);};
- const external=["429","503","timeout","backoff","exhaust","cancel_running"].includes(scenario);
+ const external=["429","503","timeout","backoff","exhaust","cancel_running","stale"].includes(scenario);
  const step=external?{key:"repo",operation:"github_repository_status",input:target,max_attempts:scenario==="exhaust"?2:3,timeout_ms:1000}:{key:"hash",operation:"sha256_verify",input:{text:"abc",expected_sha256:scenario==="dependency"?"0".repeat(64):hash("abc")},max_attempts:3};
  const steps=[step];if(scenario==="dependency")steps.push({key:"dependent",operation:"health_probe",input:{},depends_on:["hash"]});
  const args={project,name:"Recovery "+scenario,idempotency_key:"recovery-"+id,steps};
@@ -42,6 +42,12 @@ export async function recoveryQualification(db,params){
    const now=Date.now(),attempt=before.attempts;
    const fetcher=async(_url,options)=>{
     if(scenario==="cancel_running"){await workflowCancel(db,owner,ref);return okFetch();}
+    if(scenario==="stale"&&attempt===0){
+      const recovered=await runWorkflowBatch(db,owner,1,okFetch,now+32000);
+      check("replacement_lease_executed",recovered.executed===1);
+      // Old claimant returns a different payload after replacement commits.
+      return Response.json({id:99,full_name:"octo/repo",default_branch:"stale",private:false});
+    }
     if(scenario==="timeout"&&attempt===0){if(!options.signal)throw Error("missing_abort_signal");await new Promise((resolve,reject)=>{if(options.signal.aborted)reject(options.signal.reason);else options.signal.addEventListener("abort",()=>reject(options.signal.reason),{once:true});});}
     if(scenario==="exhaust"||(scenario==="backoff"&&attempt<2)||((scenario==="429"||scenario==="503")&&attempt===0))return new Response("{}",{status:scenario==="429"?429:503,headers:scenario==="429"||scenario==="503"?{"Retry-After":"3"}:{}});
     return okFetch();
@@ -78,5 +84,6 @@ export async function recoveryQualification(db,params){
  const w=await workflowStatus(db,owner,ref);
  const leases=(await db.prepare("SELECT step_key,available_at,lease_id,lease_until FROM eg_workflow_steps WHERE owner=? AND project=? AND workflow_id=?").bind(owner,project,ref.workflow_id).all()).results||[];
  result.workflow_state=w.workflow?.state;result.steps=(w.steps||[]).map(s=>({id:s.id,key:s.key,state:s.state,attempts:s.attempts,error_code:s.error_code,updated_at:s.updated_at,verified:s.evidence?.verified===true,available_at:leases.find(l=>l.step_key===s.key)?.available_at,lease_released:!leases.find(l=>l.step_key===s.key)?.lease_id}));
+ if(scenario==="stale"&&phase==="advance")check("stale_result_rejected",w.steps[0]?.result?.repository?.default_branch==="main"&&w.steps[0]?.attempts===2&&w.workflow?.state==="SUCCEEDED");
  result.status=Object.values(result.checks).every(Boolean)?"OBSERVED":"FAIL";return result;
 }

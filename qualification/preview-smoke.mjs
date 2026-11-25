@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {readFileSync,writeFileSync} from "node:fs";
 import {spawnSync} from "node:child_process";
 import {createHash} from "node:crypto";
+import {runInNewContext} from "node:vm";
 const repo="19wolfalone92/Execution-Guard",branch="audit/oauth-e2e-20261125",sha=process.env.GITHUB_SHA,account=process.env.CLOUDFLARE_ACCOUNT_ID,management=process.env.CLOUDFLARE_MANAGEMENT_TOKEN,read=process.env.CLOUDFLARE_API_TOKEN,tick=process.env.EG_PREVIEW_TICK_SECRET;
 const host="https://audit-oauth-e2e-20261125-execution-guard.19wolf-alone92.workers.dev";
 const out={sha,checks:{},automatic_build:null};
@@ -96,6 +97,11 @@ try{
  let page;for(let i=0;i<20;i++){try{page=await req(host,"/qualification/oauth");if(page.status===200)break;}catch{}await sleep(3000);}
  check("browser_authorization_ready",page?.status===200&&(await page.text()).includes("Начать проверку"));
  const js=await req(host,"/qualification/oauth.js");check("browser_script_available",js.status===200&&js.headers.get("Content-Type")?.includes("javascript"));
+ const nodes=Object.fromEntries(["status","result","start"].map(k=>[k,{textContent:""}]));
+ const receipt={status:"PASS",project:proof,sha:"517d31587779cd648d0f00eba01265d50914ff8d",workflow_id:workflow,state:"SUCCEEDED"};
+ // Execute deployed, bundled JS in an isolated VM. No tokens or network are supplied.
+ const vm={document:{getElementById:k=>nodes[k],querySelector:()=>({content:"fixture"})},location:{origin:host,pathname:"/qualification/oauth/return",search:""},sessionStorage:{getItem:k=>k==="eg-q-last-receipt-v1"?JSON.stringify(receipt):null},URLSearchParams,console:{log:()=>{}},fetch:()=>{throw Error("network disabled")}};
+ runInNewContext(await js.text(),vm,{timeout:2000});check("bundled_receipt_restore",nodes.status.textContent.includes("PASS")&&JSON.parse(nodes.result.textContent).workflow_id===workflow);
  check("production_browser_route_denied",(await req("https://execution-guard.19wolf-alone92.workers.dev","/qualification/oauth")).status===404);
  out.memory_after=await snapshot();check("prior_live_memory_preserved",JSON.stringify(out.memory_before)===JSON.stringify(out.memory_after));
  check("prior_dag_seven_steps",out.memory_after.steps.count===7);

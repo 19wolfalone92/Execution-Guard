@@ -39,12 +39,15 @@ try{
  const bm=await api("/d1/database/"+production+"/time_travel/bookmark");out.bookmark=bm.ok?bm.result?.bookmark:null;check("bookmark",typeof out.bookmark==="string"&&out.bookmark.length>0);
  // Prevent an automatic promotion on eventual merge. Only exact existing main trigger.
  stage="controlled_trigger";
- const tr=await api("/builds/triggers/"+trigger,manage);out.trigger_before={http:tr.http,ok:tr.ok,errors:tr.errors,command:tr.result?.deploy_command,branches:tr.result?.branch_includes};
+ const workers=await api("/workers/scripts");const tag=workers.result?.find(x=>x.id==="execution-guard")?.tag;
+ check("worker_tag",workers.ok&&typeof tag==="string"&&/^[a-f0-9-]{32,36}$/.test(tag));
+ const getTrigger=async()=>{const list=await api("/builds/workers/"+tag+"/triggers",manage);return {...list,result:list.result?.find(t=>t.trigger_uuid===trigger)};};
+ const tr=await getTrigger();out.trigger_before={http:tr.http,ok:tr.ok,errors:tr.errors,command:tr.result?.deploy_command,branches:tr.result?.branch_includes};
  if(tr.ok&&tr.result?.trigger_uuid===trigger&&Array.isArray(tr.result.branch_includes)&&tr.result.branch_includes.length===1&&tr.result.branch_includes[0]==="main"&&["npx wrangler deploy","npx wrangler versions upload"].includes(tr.result.deploy_command)){
   if(tr.result.deploy_command==="npx wrangler deploy"){
    const change=await api("/builds/triggers/"+trigger,manage,"PATCH",{deploy_command:"npx wrangler versions upload"});out.trigger_update={http:change.http,ok:change.ok,errors:change.errors};
   }
-  const after=await api("/builds/triggers/"+trigger,manage);out.trigger_after={http:after.http,ok:after.ok,command:after.result?.deploy_command,branches:after.result?.branch_includes};
+  const after=await getTrigger();out.trigger_after={http:after.http,ok:after.ok,command:after.result?.deploy_command,branches:after.result?.branch_includes};
   out.controlled_trigger=after.ok&&after.result?.deploy_command==="npx wrangler versions upload"&&JSON.stringify(after.result.branch_includes)===JSON.stringify(["main"]);
  }else out.controlled_trigger=false;
  if(!backup){out.status="BLOCKED";out.reason="missing_d1_edit_token";process.exitCode=1;}

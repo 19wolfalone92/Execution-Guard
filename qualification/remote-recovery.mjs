@@ -7,7 +7,7 @@ export async function remoteRecovery(host,tick){
   const body=await r.json().catch(()=>({status:"INVALID_RESPONSE"}));
   (matrix[scenario]??={calls:[]}).calls.push({http:r.status,...body});assert.ok(r.ok&&body.status==="OBSERVED",scenario+":"+phase);return body;
  };
- for(const scenario of ["lease","concurrent","429","503","timeout","backoff","exhaust","dependency","cancel_running","cancel_queued","tamper","memory"]){
+ for(const scenario of ["lease","concurrent","429","503","timeout","backoff","exhaust","dependency","cancel_running","cancel_queued","tamper","memory","stale"]){
   ids[scenario]=randomUUID();const m=matrix[scenario]={calls:[]};
   try{
    const start=await request(scenario,"setup");let final;
@@ -27,7 +27,7 @@ export async function remoteRecovery(host,tick){
     }else if(scenario==="dependency"){assert.equal(first.workflow_state,"FAILED");assert.equal(first.steps.find(s=>s.key==="dependent").attempts,0);assert.equal((await request(scenario,"advance")).executed,0);}
     else if(scenario==="cancel_running"){assert.equal(first.workflow_state,"CANCELLED");assert.equal(first.steps[0].state,"CANCELLED");}
     else if(scenario==="tamper"){assert.equal(first.workflow_state,"SUCCEEDED");final=await request(scenario,"tamper");}
-    else if(scenario==="lease"){assert.equal(first.workflow_state,"SUCCEEDED");assert.equal(first.steps[0].attempts,2);}
+    else if(scenario==="lease"||scenario==="stale"){assert.equal(first.workflow_state,"SUCCEEDED");assert.equal(first.steps[0].attempts,2);}
    }
    assert.ok(final.steps.every(s=>s.lease_released));m.status="PASS";
   }catch(e){m.status="FAIL";m.failure=e?.name==="AssertionError"?"assertion_failed":"transport_or_execution";}
