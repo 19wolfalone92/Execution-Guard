@@ -64,6 +64,8 @@ The OAuth/MCP runtime workflow uses the pinned Cloudflare OAuth provider in work
 
 The production health probe submitted through the protected MCP has succeeded with `verified: true`, one attempt, and the existing D1 persistence probe. The previous `oauth-qualification` checkpoint at revision 2 and its original task evidence remain intact.
 
+The Cloudflare Workers & Pages GitHub integration attempted preview builds for commits `6e157a5` and `55d9eb7`; both reported Build: Failed and produced no preview URL. The Cloudflare dashboard logs are account-authenticated and not accessible through the connected tools, so the build failure's root cause remains unverified. The live production smoke reports version `0.5.0`; no production deployment was performed.
+
 The candidate remains HOLD until all of the following are independently confirmed:
 
 - All GitHub Actions checks pass on the final PR head.
