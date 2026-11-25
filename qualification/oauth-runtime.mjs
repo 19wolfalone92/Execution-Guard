@@ -109,7 +109,6 @@ try{
   const bad=await exchange(code,"B".repeat(64));ok(bad.status>=400,"incorrect PKCE verifier rejected");
   const tokenResponse=await exchange(code);assert.equal(tokenResponse.status,200,await tokenResponse.clone().text());const tokens=await json(tokenResponse);
   ok(typeof tokens.access_token==="string"&&typeof tokens.refresh_token==="string"&&tokens.token_type.toLowerCase()==="bearer","authorization code exchanged for MCP tokens");
-  const replay=await exchange(code);ok(replay.status>=400,"authorization code cannot replay");
   const init=await rpc(tokens.access_token,"initialize",{protocolVersion:"2025-11-25",capabilities:{},clientInfo:{name:"qualification",version:"1"}});
   ok(init.serverInfo.name==="execution-guard-private"&&init.protocolVersion==="2025-11-25","MCP initialize");
   const notification=await call("/mcp-private",{method:"POST",headers:{Authorization:"Bearer "+tokens.access_token,"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})});ok(notification.status===202,"MCP initialized notification");
@@ -126,6 +125,11 @@ try{
   ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task completed and result verified");
   const refresh=await tokenRequest({grant_type:"refresh_token",client_id:clientId,refresh_token:tokens.refresh_token,resource});assert.equal(refresh.status,200,await refresh.clone().text());const refreshed=await json(refresh);
   ok(value(await tool(refreshed.access_token,"whoami")).owner_verified,"refreshed token usable");
+  // RFC 6749 §10.5: replay of a genuine authorization code revokes its grant and tokens.
+  // Exercise replay only after using and refreshing the legitimate token.
+  const replay=await exchange(code);ok(replay.status>=400,"authorization code cannot replay");
+  const revoked=await call("/mcp-private",{method:"POST",headers:{Authorization:"Bearer "+refreshed.access_token,"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:99,method:"tools/list"})});
+  ok(revoked.status===401,"replay revokes previously issued tokens");
   const readOnly=await issue("eg:read");const readTokenResponse=await exchange(readOnly.code);assert.equal(readTokenResponse.status,200,await readTokenResponse.clone().text());const readTokens=await json(readTokenResponse);
   ok(value(await tool(readTokens.access_token,"checkpoint_get",{project:"qualification"})).found,"read-only scope permits read");
   const blocked=await tool(readTokens.access_token,"checkpoint_put",{project:"qualification",expected_revision:1,value:"forbidden"});
@@ -134,3 +138,19 @@ try{
   mock.assertNoPendingInterceptors();
   console.log("QUALIFICATION PASS: "+checks+" assertions; actual workerd and OAuth library; simulated GitHub only.");
 }finally{await mf.dispose();await mock.close();}
+
+/* Independent production smoke, read-only, no OAuth secrets or issued tokens. */
+try {
+  const live=(path,opts={})=>fetch(host+path,{...opts,redirect:"manual",signal:AbortSignal.timeout(12000)});
+  const healthResponse=await live("/health");assert.equal(healthResponse.status,200);
+  const health=await healthResponse.json();
+  assert.equal(health.status,"online");assert.equal(health.database,"online");
+  assert.equal(health.persistence_probe,"verified");assert.equal(health.oauth?.discovery,"verified");
+  const clientResponse=await live("/oauth/client-info");assert.equal(clientResponse.status,200);
+  const client=await clientResponse.json();assert.equal(client.status,"ready");assert.equal(client.redirect_uri,redirect);
+  const authResponse=await live("/.well-known/oauth-authorization-server");assert.equal(authResponse.status,200);
+  const metadata=await authResponse.json();assert.equal(metadata.issuer,host);assert.equal(metadata.authorization_response_iss_parameter_supported,true);assert.ok(metadata.code_challenge_methods_supported.includes("S256"));
+  const privateResponse=await live("/mcp-private",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"})});
+  assert.equal(privateResponse.status,401);assert.match(privateResponse.headers.get("WWW-Authenticate")||"",/resource_metadata=/);
+  console.log("LIVE SMOKE PASS: D1, persistence, discovery, registered client, unauthenticated MCP rejected. No user sign-in attempted.");
+}catch(e){console.log("LIVE SMOKE NOT CONFIRMED: "+(e?.name||"Error"));}
