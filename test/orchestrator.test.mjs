@@ -281,3 +281,38 @@ test("resume settles already completed last step instead of remaining queued",as
     assert.equal((await executionFinalize(f.db,owner,args)).verified,true);
   }finally{f.close()}
 });
+
+test("fixed qualification DAG resolves branch SHA, checks exact Actions runs, verifies snapshot and writes one dedicated checkpoint",async()=>{
+  const f=dbFixture();const project="eg-qualification-test",sha="a".repeat(40);
+  try{
+    seedProbe(f.raw);await seedProject(f.db,project);
+    const steps=[
+      {key:"health",operation:"health_probe",input:{}},
+      {key:"repo",operation:"github_repository_status",input:{owner:"19wolfalone92",repo:"Execution-Guard"}},
+      {key:"head",operation:"github_branch_head",input:{owner:"19wolfalone92",repo:"Execution-Guard",branch:"audit/oauth-e2e-20261125"},depends_on:["repo"]},
+      {key:"ci",operation:"github_actions_for_branch",input:{branch_step:"head"},depends_on:["head"]},
+      {key:"collect",operation:"qualification_collect",depends_on:["health","repo","head","ci"]},
+      {key:"verify",operation:"qualification_verify",depends_on:["collect"]},
+      {key:"save",operation:"qualification_checkpoint",depends_on:["verify"]}
+    ];
+    const def={project,name:"release proof",idempotency_key:"release-proof-test",steps};
+    const w=await workflowCreate(f.db,owner,def);assert.equal(w.status,"created");
+    assert.equal((await workflowCreate(f.db,owner,def)).workflow_id,w.workflow_id);
+    assert.equal((await workflowCreate(f.db,owner,{...def,idempotency_key:"wrong-dependency",steps:steps.map(s=>s.key==="save"?{...s,depends_on:["collect"]}:s)})).error,"invalid_workflow_definition");
+    const calls=[];
+    const fetcher=async url=>{calls.push(url);const data=url.includes("/git/ref/")?{ref:"refs/heads/audit/oauth-e2e-20261125",object:{type:"commit",sha}}:url.includes("/actions/runs?")?{total_count:3,workflow_runs:["Qualification","OAuth and MCP runtime qualification","Exact Preview HTTP and isolation qualification"].map((name,i)=>({id:i+1,name,head_sha:sha,status:"completed",conclusion:"success"}))}:{id:7,full_name:"19wolfalone92/Execution-Guard",default_branch:"main",private:false};return new Response(JSON.stringify(data),{status:200})};
+    await workflowStart(f.db,owner,{project,workflow_id:w.workflow_id});
+    await runWorkflowBatch(f.db,owner,8,fetcher,Date.now());
+    const result=await workflowStatus(f.db,owner,{project,workflow_id:w.workflow_id});
+    assert.equal(result.workflow.state,"SUCCEEDED");
+    assert.equal(result.steps.length,7);assert.ok(result.steps.every(s=>s.attempts===1&&s.evidence.verified));
+    assert.ok(calls.some(x=>x.includes("head_sha="+sha)));
+    const saved=result.steps.find(s=>s.key==="save").result;
+    const row=f.raw.prepare("SELECT revision,value FROM eg_checkpoints WHERE owner=? AND project=?").get(owner,saved.checkpoint);
+    assert.equal(row.revision,1);assert.equal(JSON.parse(row.value).snapshot.sha,sha);
+    assert.equal(JSON.parse(row.value).sha256,saved.sha256);
+    assert.equal((await executionFinalize(f.db,owner,{project,workflow_id:w.workflow_id})).verified,true);
+    await runWorkflowBatch(f.db,owner,8,fetcher,Date.now());
+    assert.equal(f.raw.prepare("SELECT COUNT(*) AS n FROM eg_checkpoints").get().n,1);
+  }finally{f.close()}
+});

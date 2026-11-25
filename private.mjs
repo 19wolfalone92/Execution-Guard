@@ -22,7 +22,7 @@ const recordSchema = {type:"object",properties:{
 },additionalProperties:false};
 const stepSchema = {type:"object",properties:{
   key:{type:"string",pattern:"^[a-z0-9][a-z0-9_-]{0,31}$"},
-  operation:{type:"string",enum:["health_probe","sha256_verify","github_repository_status","github_commit_status","github_workflow_status"]},
+  operation:{type:"string",enum:["health_probe","sha256_verify","github_repository_status","github_commit_status","github_workflow_status","github_branch_head","github_actions_for_branch","qualification_collect","qualification_verify","qualification_checkpoint"]},
   input:{type:"object"},depends_on:{type:"array",maxItems:31,items:{type:"string"}},
   max_attempts:{type:"integer",minimum:1,maximum:5},timeout_ms:{type:"integer",minimum:1000,maximum:30000}
 },required:["key","operation"],additionalProperties:false};
@@ -47,7 +47,7 @@ const tools = [
   def("project_update","Patch project memory with optimistic revision checking; each accepted revision is retained in history.",{project,expected_revision:{type:"integer",minimum:1},patch:recordSchema},["project","expected_revision","patch"],true),
   def("project_history","Read prior project memory revisions.",{project,limit:{type:"integer",minimum:1,maximum:50}},["project","limit"]),
   def("project_resume","Read a saved project state and indicate whether external repository reconciliation is required.",{project},["project"]),
-  def("workflow_create","Create an idempotent bounded DAG workflow. Reusing an idempotency key with the same definition returns the existing workflow; a different definition is rejected. Only health, SHA-256 and public GitHub read operations are executable.",{project,name:{type:"string",minLength:1,maxLength:160},idempotency_key:{type:"string",pattern:"^[A-Za-z0-9_-]{8,64}$"},steps:{type:"array",minItems:1,maxItems:32,items:stepSchema}},["project","name","idempotency_key","steps"],true),
+  def("workflow_create","Create an idempotent bounded DAG workflow. Reusing an idempotency key with the same definition returns the existing workflow; a different definition is rejected. Only bounded health, SHA-256 and public GitHub read operations, plus a fixed Execution Guard qualification pipeline with its own write-once evidence checkpoint, are executable.",{project,name:{type:"string",minLength:1,maxLength:160},idempotency_key:{type:"string",pattern:"^[A-Za-z0-9_-]{8,64}$"},steps:{type:"array",minItems:1,maxItems:32,items:stepSchema}},["project","name","idempotency_key","steps"],true),
   def("workflow_start","Start a newly created workflow; dependency-free steps become queued.",workflowRef,["project","workflow_id"],true),
   def("workflow_status","Read workflow state, step states, results and verification evidence.",workflowRef,["project","workflow_id"]),
   def("workflow_pause","Pause new workflow steps while allowing an already-running bounded read to finish.",workflowRef,["project","workflow_id"],true),

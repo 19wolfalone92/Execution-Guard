@@ -8,7 +8,7 @@ const repoPartPattern = /^(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}$/;
 const shaPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const secretKeyPattern = /(?:token|secret|password|credential|private.?key|authorization|cookie)/i;
 const projectFields = new Set(["goal","rules","repository","branch","commit","pull_request","stage","completed","pending","errors","tests","limitations","next_action","evidence"]);
-const operations = new Set(["health_probe","sha256_verify","github_repository_status","github_commit_status","github_workflow_status"]);
+const operations = new Set(["health_probe","sha256_verify","github_repository_status","github_commit_status","github_workflow_status","github_branch_head","github_actions_for_branch","qualification_collect","qualification_verify","qualification_checkpoint"]);
 const nowIso = () => new Date().toISOString();
 const bytes = value => new TextEncoder().encode(value).length;
 const isObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -137,7 +137,26 @@ function validateGithubInput(operation, input) {
   if (operation === "github_repository_status") return allKeys(input,["owner","repo"]) && repoPartPattern.test(input.owner) && repoPartPattern.test(input.repo);
   if (operation === "github_commit_status") return allKeys(input,["owner","repo","sha"]) && repoPartPattern.test(input.owner) && repoPartPattern.test(input.repo) && shaPattern.test(input.sha);
   if (operation === "github_workflow_status") return allKeys(input,["owner","repo","run_id"]) && repoPartPattern.test(input.owner) && repoPartPattern.test(input.repo) && Number.isSafeInteger(input.run_id) && input.run_id > 0;
+  if (operation==="github_branch_head") return allKeys(input,["owner","repo","branch"])&&repoPartPattern.test(input.owner)&&repoPartPattern.test(input.repo)&&typeof input.branch==="string"&&/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(input.branch)&&!input.branch.includes("..");
+  if (operation==="github_actions_for_branch") return allKeys(input,["branch_step"])&&typeof input.branch_step==="string"&&stepKeyPattern.test(input.branch_step);
+  if (["qualification_collect","qualification_verify","qualification_checkpoint"].includes(operation)) return Object.keys(input).length===0;
   return false;
+}
+
+const qualificationOps=new Set(["github_branch_head","github_actions_for_branch","qualification_collect","qualification_verify","qualification_checkpoint"]);
+const requiredCI=["Qualification","OAuth and MCP runtime qualification","Exact Preview HTTP and isolation qualification"];
+function validateQualification(steps,project){
+  if(!steps.some(s=>qualificationOps.has(s.operation)))return true;
+  // This release acceptance workflow is deliberately fixed and scoped to a
+  // dedicated project. It is not a general-purpose write or expression engine.
+  if(!project.startsWith("eg-qualification-")||steps.length!==7)return false;
+  const m=new Map(steps.map(s=>[s.operation,s]));
+  if(m.size!==7||!["health_probe","github_repository_status",...qualificationOps].every(x=>m.has(x)))return false;
+  const health=m.get("health_probe"),repo=m.get("github_repository_status"),head=m.get("github_branch_head"),ci=m.get("github_actions_for_branch"),collect=m.get("qualification_collect"),verify=m.get("qualification_verify"),save=m.get("qualification_checkpoint");
+  const deps=(s,keys)=>s.depends_on.length===keys.length&&keys.every(k=>s.depends_on.includes(k));
+  const target=x=>x.owner==="19wolfalone92"&&x.repo==="Execution-Guard";
+  return target(repo.input)&&target(head.input)&&head.input.branch==="audit/oauth-e2e-20261125"&&ci.input.branch_step===head.key&&
+    deps(health,[])&&deps(repo,[])&&deps(head,[repo.key])&&deps(ci,[head.key])&&deps(collect,[health.key,repo.key,head.key,ci.key])&&deps(verify,[collect.key])&&deps(save,[verify.key]);
 }
 
 function validateSteps(steps) {
@@ -174,7 +193,7 @@ function validateSteps(steps) {
 export async function workflowCreate(db, owner, args) {
   if (!allKeys(args,["project","name","idempotency_key","steps"]) || !projectPattern.test(args.project) || typeof args.name!=="string" || !args.name.trim() || bytes(args.name)>160 || typeof args.idempotency_key!=="string" || !idempotencyPattern.test(args.idempotency_key)) return {error:"invalid_arguments"};
   const steps = validateSteps(args.steps);
-  if (!steps) return {error:"invalid_workflow_definition"};
+  if (!steps||!validateQualification(steps,args.project)) return {error:"invalid_workflow_definition"};
   await ensureSchema(db);
   const project = await db.prepare("SELECT project FROM eg_projects WHERE owner=? AND project=?").bind(owner,args.project).first();
   if (!project) return {error:"project_not_found"};
@@ -224,7 +243,7 @@ export async function workflowStatus(db, owner, args) {
   const workflow=await loadWorkflow(db,owner,args.project,args.workflow_id);
   if(!workflow)return {found:false};
   const steps=await loadSteps(db,owner,args.project,args.workflow_id);
-  return {found:true,workflow:{id:workflow.id,project:workflow.project,name:workflow.name,state:workflow.state,created_at:workflow.created_at,updated_at:workflow.updated_at,finished_at:workflow.finished_at,error_code:workflow.error_code},steps:steps.map(step=>({key:step.step_key,operation:step.operation,depends_on:parseJson(step.depends_on,[]),state:step.state,attempts:step.attempts,max_attempts:step.max_attempts,result:parseJson(step.result),evidence:parseJson(step.evidence),error_code:step.error_code}))};
+  return {found:true,workflow:{id:workflow.id,project:workflow.project,name:workflow.name,state:workflow.state,created_at:workflow.created_at,updated_at:workflow.updated_at,finished_at:workflow.finished_at,error_code:workflow.error_code},steps:steps.map(step=>({id:step.id,key:step.step_key,operation:step.operation,depends_on:parseJson(step.depends_on,[]),state:step.state,attempts:step.attempts,max_attempts:step.max_attempts,created_at:step.created_at,updated_at:step.updated_at,result:parseJson(step.result),evidence:parseJson(step.evidence),error_code:step.error_code}))};
 }
 
 export async function workflowDependenciesGet(db, owner, args) {
@@ -385,7 +404,20 @@ export async function githubWorkflowStatus(args, fetcher=fetch) {
   } catch(error) {return {error:error.code||error.message,retryable:error instanceof RetryableError};}
 }
 
-async function executeOperation(db, operation, input, timeoutMs, fetcher) {
+const digestOf=text=>createHash("sha256").update(text,"utf8").digest("hex");
+function checkedResult(row){
+  if(row?.state!=="SUCCEEDED"||typeof row.result!=="string")throw new Error("dependency_not_verified");
+  const result=parseJson(row.result),evidence=parseJson(row.evidence);
+  if(result?.verified!==true||evidence?.verified!==true||digestOf(row.result)!==evidence.result_sha256)throw new Error("dependency_integrity_failed");
+  return result;
+}
+function qualificationSnapshot(rows,workflowId){
+  const get=op=>checkedResult(rows.find(r=>r.operation===op));
+  const health=get("health_probe"),repo=get("github_repository_status"),head=get("github_branch_head"),ci=get("github_actions_for_branch");
+  if(health.persistence_probe!=="verified"||repo.repository?.full_name?.toLowerCase()!=="19wolfalone92/execution-guard"||head.repository!=="19wolfalone92/Execution-Guard"||head.branch!=="audit/oauth-e2e-20261125"||ci.sha!==head.sha||ci.repository!==head.repository||!requiredCI.every(n=>ci.runs.some(r=>r.name===n&&r.status==="completed"&&r.conclusion==="success"))||ci.runs.some(r=>r.head_sha!==head.sha||r.status!=="completed"||r.conclusion!=="success"))throw new Error("qualification_semantic_mismatch");
+  return {workflow_id:workflowId,health,repository:repo.repository,branch:head.branch,sha:head.sha,ci:ci.runs,observed_at:head.checked_at};
+}
+async function executeOperation(db, operation, input, timeoutMs, fetcher, context) {
   if(operation==="health_probe"){
     const row=await db.prepare("SELECT value FROM eg_probe WHERE id=1").first();
     return {verified:row?.value==="execution-guard-v030",database:"online",persistence_probe:row?.value==="execution-guard-v030"?"verified":"not_verified",checked_at:nowIso()};
@@ -396,7 +428,7 @@ async function executeOperation(db, operation, input, timeoutMs, fetcher) {
   }
   if(operation==="github_repository_status"){
     const data=await githubJson("/repos/"+encodeURIComponent(input.owner)+"/"+encodeURIComponent(input.repo),timeoutMs,fetcher);
-    return {verified:typeof data.full_name==="string"&&typeof data.default_branch==="string",repository:{id:data.id,full_name:data.full_name,private:Boolean(data.private),archived:Boolean(data.archived),default_branch:data.default_branch,updated_at:data.updated_at},checked_at:nowIso()};
+    return {verified:typeof data.full_name==="string"&&data.full_name.toLowerCase()===(input.owner+"/"+input.repo).toLowerCase()&&typeof data.default_branch==="string",repository:{id:data.id,full_name:data.full_name,private:Boolean(data.private),archived:Boolean(data.archived),default_branch:data.default_branch,updated_at:data.updated_at},checked_at:nowIso()};
   }
   if(operation==="github_commit_status"){
     const data=await githubJson("/repos/"+encodeURIComponent(input.owner)+"/"+encodeURIComponent(input.repo)+"/commits/"+input.sha+"/status",timeoutMs,fetcher);
@@ -405,7 +437,45 @@ async function executeOperation(db, operation, input, timeoutMs, fetcher) {
   if(operation==="github_workflow_status"){
     const data=await githubJson("/repos/"+encodeURIComponent(input.owner)+"/"+encodeURIComponent(input.repo)+"/actions/runs/"+input.run_id,timeoutMs,fetcher);
     if(data.status!=="completed")throw new RetryableError("github_workflow_in_progress",30000);
-    return {verified:data.conclusion==="success",status:data.status,conclusion:data.conclusion,run_id:data.id,head_sha:data.head_sha,html_url:data.html_url,checked_at:nowIso()};
+    return {verified:data.id===input.run_id&&data.conclusion==="success",status:data.status,conclusion:data.conclusion,run_id:data.id,head_sha:data.head_sha,html_url:data.html_url,checked_at:nowIso()};
+  }
+  if(operation==="github_branch_head"){
+    const repository=input.owner+"/"+input.repo;
+    const data=await githubJson("/repos/"+encodeURIComponent(input.owner)+"/"+encodeURIComponent(input.repo)+"/git/ref/heads/"+input.branch.split("/").map(encodeURIComponent).join("/"),timeoutMs,fetcher);
+    return {verified:data.ref==="refs/heads/"+input.branch&&data.object?.type==="commit"&&/^[a-f0-9]{40}$/.test(data.object?.sha||""),repository,branch:input.branch,sha:data.object?.sha,checked_at:nowIso()};
+  }
+  if(qualificationOps.has(operation)){
+    const {owner,project,claimed,lease}=context;
+    const rows=await loadSteps(db,owner,project,claimed.workflow_id);
+    const source=op=>checkedResult(rows.find(r=>r.operation===op));
+    if(operation==="github_actions_for_branch"){
+      const head=checkedResult(rows.find(r=>r.step_key===input.branch_step&&r.operation==="github_branch_head"));
+      const data=await githubJson("/repos/"+head.repository+"/actions/runs?head_sha="+head.sha+"&per_page=100",timeoutMs,fetcher);
+      if(!Array.isArray(data.workflow_runs)||!Number.isSafeInteger(data.total_count)||data.total_count>100)throw new Error("github_actions_incomplete");
+      const runs=data.workflow_runs.filter(x=>requiredCI.includes(x.name)).map(x=>({id:x.id,name:x.name,head_sha:x.head_sha,status:x.status,conclusion:x.conclusion}));
+      if(!requiredCI.every(n=>runs.some(x=>x.name===n))||runs.some(x=>x.status!=="completed"))throw new RetryableError("github_workflow_in_progress",30000);
+      return {verified:runs.every(x=>Number.isSafeInteger(x.id)&&x.head_sha===head.sha&&x.conclusion==="success"),repository:head.repository,sha:head.sha,runs,checked_at:nowIso()};
+    }
+    if(operation==="qualification_collect"){
+      const snapshot=qualificationSnapshot(rows,claimed.workflow_id),serialized=JSON.stringify(snapshot);
+      if(bytes(serialized)>6000||!scanForSecrets(snapshot))throw new Error("qualification_result_invalid");
+      return {verified:true,snapshot,sha256:digestOf(serialized),checked_at:nowIso()};
+    }
+    if(operation==="qualification_verify"){
+      const collected=source("qualification_collect"),independent=qualificationSnapshot(rows,claimed.workflow_id);
+      const serialized=JSON.stringify(independent),actual=digestOf(serialized);
+      return {verified:JSON.stringify(collected.snapshot)===serialized&&collected.sha256===actual,sha256:actual,checked_at:nowIso()};
+    }
+    if(operation==="qualification_checkpoint"){
+      const verified=source("qualification_verify"),collected=source("qualification_collect");
+      const serialized=JSON.stringify({snapshot:collected.snapshot,sha256:verified.sha256});
+      if(verified.sha256!==collected.sha256||digestOf(JSON.stringify(collected.snapshot))!==verified.sha256||bytes(serialized)>8192||!scanForSecrets(collected.snapshot))throw new Error("qualification_result_invalid");
+      const key="eg-qualification-"+claimed.workflow_id;
+      await db.prepare("CREATE TABLE IF NOT EXISTS eg_checkpoints (owner TEXT NOT NULL, project TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), value TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner,project))").run();
+      await db.prepare("INSERT INTO eg_checkpoints(owner,project,revision,value,updated_at) SELECT ?,?,1,?,? WHERE EXISTS(SELECT 1 FROM eg_workflow_steps s JOIN eg_workflows w ON w.id=s.workflow_id WHERE s.id=? AND s.owner=? AND s.project=? AND s.lease_id=? AND s.state='RUNNING' AND w.state IN ('QUEUED','RUNNING','RETRYING','BLOCKED')) ON CONFLICT(owner,project) DO NOTHING").bind(owner,key,serialized,nowIso(),claimed.id,owner,project,lease).run();
+      const saved=await db.prepare("SELECT revision,value FROM eg_checkpoints WHERE owner=? AND project=?").bind(owner,key).first();
+      return {verified:saved?.revision===1&&saved.value===serialized,checkpoint:key,revision:saved?.revision??null,sha256:verified.sha256,checked_at:nowIso()};
+    }
   }
   throw new Error("unsupported_operation");
 }
@@ -467,7 +537,7 @@ export async function runWorkflowBatch(db, owner, limit=4, fetcher=fetch, now=Da
     if(!claimed)continue;
     await db.prepare("UPDATE eg_workflows SET state='RUNNING',updated_at=? WHERE id=? AND owner=? AND state IN ('QUEUED','RETRYING','BLOCKED','RUNNING')").bind(started,claimed.workflow_id,owner).run();
     let result=null,transient=false,errorCode=null,delay=0;
-    try { result=await executeOperation(db,claimed.operation,parseJson(claimed.input,{}),claimed.timeout_ms,fetcher); }
+    try { result=await executeOperation(db,claimed.operation,parseJson(claimed.input,{}),claimed.timeout_ms,fetcher,{owner,project:claimed.project,claimed,lease}); }
     catch(error) { transient=error instanceof RetryableError;errorCode=error.code||error.message||"execution_error";delay=error.delayMs||0; }
     const workflowAfterExecution=await loadWorkflow(db,owner,claimed.project,claimed.workflow_id);
     if(workflowAfterExecution?.state==="CANCELLED"){
