@@ -1,4 +1,4 @@
-const VERSION = "0.3.1";
+const VERSION = "0.4.0";
 async function status(env) {
   let database = "not_verified";
   let persistence_probe = "not_verified";

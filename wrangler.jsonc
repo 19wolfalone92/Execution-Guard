@@ -1,6 +1,6 @@
 {
   "name": "execution-guard",
-  "main": "worker.mjs",
+  "main": "gateway.mjs",
   "compatibility_date": "2026-11-25",
   "keep_vars": true,
   "d1_databases": [
@@ -9,5 +9,9 @@
       "database_name": "execution-guard-db",
       "database_id": "e7699170-b634-48ce-a3b0-733aedb9b898"
     }
+  ],
+  "compatibility_flags": [
+    "global_fetch_strictly_public",
+    "nodejs_compat"
   ]
 }
