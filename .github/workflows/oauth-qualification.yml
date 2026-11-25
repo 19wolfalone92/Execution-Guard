@@ -17,8 +17,8 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
-      - name: Install pinned production and runtime testing dependencies
-        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Install exact production and runtime testing dependency graph
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Report dependency audit details
         run: |
           npm audit --json > npm-audit.json || true
