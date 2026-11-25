@@ -156,3 +156,68 @@ test("workflow creation is idempotent and rejects key reuse with a different def
     assert.equal(conflict.error,"idempotency_conflict");
   }finally{f.close()}
 });
+
+
+test("expired execution lease is recovered and retried without losing the workflow",async()=>{
+  const f=dbFixture();
+  try{
+    await seedProbe(f.raw);
+    await seedProject(f.db);
+    const wf=await workflowCreate(f.db,owner,{project:"williams",name:"lease-recovery",idempotency_key:"lease-recovery-1",steps:[{key:"health",operation:"health_probe",input:{},max_attempts:3}]});
+    await workflowStart(f.db,owner,{project:"williams",workflow_id:wf.workflow_id});
+    const now=Date.now();
+    f.raw.prepare("UPDATE eg_workflows SET state='RUNNING' WHERE id=?").run(wf.workflow_id);
+    f.raw.prepare("UPDATE eg_workflow_steps SET state='RUNNING',attempts=1,lease_id='expired-lease',lease_until=? WHERE workflow_id=? AND step_key='health'").run(now-1,wf.workflow_id);
+    await runWorkflowBatch(f.db,owner,2,fetch,now);
+    const status=await workflowStatus(f.db,owner,{project:"williams",workflow_id:wf.workflow_id});
+    assert.equal(status.workflow.state,"SUCCEEDED");
+    assert.equal(status.steps[0].attempts,2);
+  }finally{f.close()}
+});
+
+test("transient GitHub 503 honors Retry-After and retries within the configured budget",async()=>{
+  const f=dbFixture();
+  try{
+    await seedProject(f.db);
+    const wf=await workflowCreate(f.db,owner,{project:"williams",name:"retry-after",idempotency_key:"retry-after-1",steps:[{key:"repo",operation:"github_repository_status",input:{owner:"octo",repo:"repo"},max_attempts:2}]});
+    await workflowStart(f.db,owner,{project:"williams",workflow_id:wf.workflow_id});
+    const now=Date.now();
+    await runWorkflowBatch(f.db,owner,1,async()=>new Response("{}",{status:503,headers:{"Retry-After":"2"}}),now);
+    const waiting=f.raw.prepare("SELECT state,attempts,available_at FROM eg_workflow_steps WHERE workflow_id=?").get(wf.workflow_id);
+    assert.equal(waiting.state,"RETRYING");
+    assert.equal(waiting.attempts,1);
+    assert.ok(waiting.available_at>=now+2000);
+    await runWorkflowBatch(f.db,owner,1,async()=>new Response(JSON.stringify({id:7,full_name:"octo/repo",default_branch:"main",private:false,archived:false}),{status:200}),now+5000);
+    const status=await workflowStatus(f.db,owner,{project:"williams",workflow_id:wf.workflow_id});
+    assert.equal(status.workflow.state,"SUCCEEDED");
+    assert.equal(status.steps[0].attempts,2);
+  }finally{f.close()}
+});
+
+test("cancelling during an in-flight GitHub read prevents the step from becoming successful",async()=>{
+  const f=dbFixture();
+  try{
+    await seedProject(f.db);
+    const wf=await workflowCreate(f.db,owner,{project:"williams",name:"cancel-in-flight",idempotency_key:"cancel-in-flight-1",steps:[{key:"repo",operation:"github_repository_status",input:{owner:"octo",repo:"repo"}}]});
+    await workflowStart(f.db,owner,{project:"williams",workflow_id:wf.workflow_id});
+    const fetcher=async()=>{await workflowCancel(f.db,owner,{project:"williams",workflow_id:wf.workflow_id});return new Response(JSON.stringify({id:7,full_name:"octo/repo",default_branch:"main"}),{status:200});};
+    await runWorkflowBatch(f.db,owner,1,fetcher,Date.now());
+    const status=await workflowStatus(f.db,owner,{project:"williams",workflow_id:wf.workflow_id});
+    assert.equal(status.workflow.state,"CANCELLED");
+    assert.equal(status.steps[0].state,"CANCELLED");
+    assert.equal((await executionFinalize(f.db,owner,{project:"williams",workflow_id:wf.workflow_id})).verified,false);
+  }finally{f.close()}
+});
+
+test("finalization detects a modified persisted result",async()=>{
+  const f=dbFixture();
+  try{
+    await seedProject(f.db);
+    const wf=await workflowCreate(f.db,owner,{project:"williams",name:"tamper-check",idempotency_key:"tamper-check-1",steps:[{key:"hash",operation:"sha256_verify",input:{text:"abc",expected_sha256:"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}}]});
+    await workflowStart(f.db,owner,{project:"williams",workflow_id:wf.workflow_id});
+    await runWorkflowBatch(f.db,owner,1,fetch,Date.now());
+    f.raw.prepare("UPDATE eg_workflow_steps SET result=? WHERE workflow_id=? AND step_key='hash'").run(JSON.stringify({verified:true,sha256:"tampered"}),wf.workflow_id);
+    const final=await executionFinalize(f.db,owner,{project:"williams",workflow_id:wf.workflow_id});
+    assert.equal(final.verified,false);
+  }finally{f.close()}
+});
