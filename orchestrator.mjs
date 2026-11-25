@@ -358,7 +358,7 @@ class RetryableError extends Error {
 }
 function retryDelay(response) {
   const header=response?.headers?.get("Retry-After");
-  if(!header)return 0;
+  if(!header){const reset=Number(response?.headers?.get("X-RateLimit-Reset"));return Number.isFinite(reset)&&reset>0?Math.max(0,Math.min(reset*1000-Date.now(),3600000)):0;}
   const seconds=Number(header);
   if(Number.isFinite(seconds)&&seconds>=0)return Math.min(seconds*1000,3600000);
   const date=Date.parse(header);
@@ -372,7 +372,7 @@ async function githubJson(path, timeoutMs=15000, fetcher=fetch) {
   } catch(error) {
     throw new RetryableError(error?.name==="TimeoutError"?"github_timeout":"github_network_error");
   }
-  if(response.status===429 || (response.status===403 && response.headers.get("X-RateLimit-Remaining")==="0"))throw new RetryableError("github_rate_limited",retryDelay(response));
+  if(response.status===429 || (response.status===403 && (response.headers.get("X-RateLimit-Remaining")==="0"||response.headers.has("Retry-After"))))throw new RetryableError("github_rate_limited",retryDelay(response));
   if(response.status>=500)throw new RetryableError("github_http_"+response.status,retryDelay(response));
   if(response.status>=300&&response.status<400)throw new Error("github_redirect_blocked");
   if(response.status===404)throw new Error("github_not_found_or_private");
@@ -385,7 +385,7 @@ export async function githubRepositoryStatus(args, fetcher=fetch) {
   try {
     const data=await githubJson("/repos/"+encodeURIComponent(args.owner)+"/"+encodeURIComponent(args.repo),15000,fetcher);
     return {verified:typeof data.full_name==="string"&&data.full_name.toLowerCase()===(args.owner+"/"+args.repo).toLowerCase()&&typeof data.default_branch==="string",repository:{id:data.id,full_name:data.full_name,private:Boolean(data.private),archived:Boolean(data.archived),default_branch:data.default_branch,updated_at:data.updated_at},checked_at:nowIso(),source:"GitHub public REST API"};
-  } catch(error) {return {error:error.code||error.message,retryable:error instanceof RetryableError};}
+  } catch(error) {return {error:error.code||error.message,retryable:error instanceof RetryableError,...(error instanceof RetryableError?{retry_after_ms:error.delayMs}: {})};}
 }
 
 export async function githubCommitStatus(args, fetcher=fetch) {
@@ -393,7 +393,7 @@ export async function githubCommitStatus(args, fetcher=fetch) {
   try {
     const data=await githubJson("/repos/"+encodeURIComponent(args.owner)+"/"+encodeURIComponent(args.repo)+"/commits/"+args.sha+"/status",15000,fetcher);
     return {verified:data.state==="success",state:data.state,total_count:data.total_count,statuses:(data.statuses||[]).slice(0,20).map(x=>({context:x.context,state:x.state,description:x.description,updated_at:x.updated_at})),sha:args.sha,checked_at:nowIso(),source:"GitHub public REST API"};
-  } catch(error) {return {error:error.code||error.message,retryable:error instanceof RetryableError};}
+  } catch(error) {return {error:error.code||error.message,retryable:error instanceof RetryableError,...(error instanceof RetryableError?{retry_after_ms:error.delayMs}: {})};}
 }
 
 export async function githubWorkflowStatus(args, fetcher=fetch) {
@@ -401,7 +401,7 @@ export async function githubWorkflowStatus(args, fetcher=fetch) {
   try {
     const data=await githubJson("/repos/"+encodeURIComponent(args.owner)+"/"+encodeURIComponent(args.repo)+"/actions/runs/"+args.run_id,15000,fetcher);
     return {verified:data.status==="completed"&&data.conclusion==="success",status:data.status,conclusion:data.conclusion,run_id:data.id,run_number:data.run_number,head_sha:data.head_sha,html_url:data.html_url,updated_at:data.updated_at,checked_at:nowIso(),source:"GitHub public REST API"};
-  } catch(error) {return {error:error.code||error.message,retryable:error instanceof RetryableError};}
+  } catch(error) {return {error:error.code||error.message,retryable:error instanceof RetryableError,...(error instanceof RetryableError?{retry_after_ms:error.delayMs}: {})};}
 }
 
 const digestOf=text=>createHash("sha256").update(text,"utf8").digest("hex");
@@ -572,10 +572,23 @@ export async function executionFinalize(db, owner, args) {
   const status=await workflowStatus(db,owner,args);
   if(!status.found)return status;
   let verified=status.workflow.state==="SUCCEEDED"&&status.steps.length>0&&status.steps.every(step=>{
-    if(step.state!=="SUCCEEDED"||step.evidence?.verified!==true||!step.result)return false;
+    if(step.state!=="SUCCEEDED"||step.evidence?.verified!==true||step.result?.verified!==true||step.evidence.operation!==step.operation)return false;
     const digest=createHash("sha256").update(JSON.stringify(step.result),"utf8").digest("hex");
     return digest===step.evidence.result_sha256;
   });
+  if(verified){
+    const rows=await loadSteps(db,owner,args.project,args.workflow_id);
+    verified=rows.every(row=>{
+      const input=parseJson(row.input),result=parseJson(row.result);
+      if(!input||!result)return false;
+      if(row.operation==="sha256_verify")return result.sha256===digestOf(input.text)&&result.expected_sha256===input.expected_sha256&&result.sha256===input.expected_sha256;
+      if(row.operation==="health_probe")return result.database==="online"&&result.persistence_probe==="verified";
+      if(row.operation==="github_repository_status")return result.repository?.full_name?.toLowerCase()===(input.owner+"/"+input.repo).toLowerCase();
+      if(row.operation==="github_commit_status")return result.sha===input.sha&&result.state==="success";
+      if(row.operation==="github_workflow_status")return result.run_id===input.run_id&&result.status==="completed"&&result.conclusion==="success";
+      return qualificationOps.has(row.operation);
+    });
+  }
   if(verified&&status.steps.some(s=>s.operation==="qualification_checkpoint")){
     try{
       const rows=await loadSteps(db,owner,args.project,args.workflow_id);

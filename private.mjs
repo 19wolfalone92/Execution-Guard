@@ -65,6 +65,21 @@ const tools = [
 ];
 function json(value, status=200) { return Response.json(value,{status,headers:{"Cache-Control":"no-store"}}); }
 function validArgs(args,keys) {return args && typeof args==="object" && !Array.isArray(args) && Object.keys(args).length===keys.length && keys.every(k=>Object.hasOwn(args,k));}
+// Validate the declared schema centrally before any tool handler, including types
+// that RegExp.test would otherwise coerce. Scope checks take precedence.
+export function matchesSchema(value,schema){
+  if(!schema||typeof schema!=="object")return false;
+  if(schema.enum&&!schema.enum.includes(value))return false;
+  if(schema.type==="object"){
+    if(!value||typeof value!=="object"||Array.isArray(value))return false;
+    if((schema.required||[]).some(k=>!Object.hasOwn(value,k)))return false;
+    return Object.entries(value).every(([k,v])=>Object.hasOwn(schema.properties||{},k)?matchesSchema(v,schema.properties[k]):schema.additionalProperties!==false);
+  }
+  if(schema.type==="array")return Array.isArray(value)&&value.length>=(schema.minItems??0)&&value.length<=(schema.maxItems??Infinity)&&value.every(v=>!schema.items||matchesSchema(v,schema.items));
+  if(schema.type==="string")return typeof value==="string"&&value.length>=(schema.minLength??0)&&value.length<=(schema.maxLength??Infinity)&&(!schema.pattern||new RegExp(schema.pattern).test(value));
+  if(schema.type==="integer")return Number.isSafeInteger(value)&&value>=(schema.minimum??-Infinity)&&value<=(schema.maximum??Infinity);
+  return !schema.type;
+}
 function containsSecret(value) {return typeof value==="string" && /(?:gh[pousr]_[A-Za-z0-9_]{20,}|Bearer\s+[A-Za-z0-9._~-]{20,}|-----BEGIN (?:RSA|OPENSSH|EC) PRIVATE KEY-----|AKIA[0-9A-Z]{16})/.test(value);}
 function writeChallenge(description,env) {
   return {"mcp/www_authenticate":[
@@ -135,6 +150,8 @@ export async function privateFetch(request,env,ctx) {
   if(m.method==="tools/list")return reply({tools});
   if(m.method!=="tools/call")return rpcError(-32601,"Method not found");
   const name=m.params?.name,args=m.params?.arguments??{},owner=ctx.props.userId;
+  const definition=tools.find(t=>t.name===name);
+  if(definition&&(!writeNames.has(name)||ctx.auth.scope.includes(WRITE))&&!matchesSchema(args,definition.inputSchema))return rpcError(-32602,"Invalid arguments");
   if(name==="whoami"){if(!validArgs(args,[]))return rpcError(-32602,"Invalid arguments");return result({authenticated:true,owner_verified:true,scopes:ctx.auth.scope});}
   if(["task_submit","task_status","task_cancel"].includes(name)){
     if(name!=="task_status"&&!ctx.auth.scope.includes(WRITE))return reply({isError:true,content:[{type:"text",text:"Write scope required"}],_meta:writeChallenge("Task write scope required",env)});

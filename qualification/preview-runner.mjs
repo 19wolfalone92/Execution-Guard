@@ -37,7 +37,7 @@ try{
     const s=JSON.parse(save.result),cp=await query("SELECT revision,value FROM eg_checkpoints WHERE owner=? AND project=?",[owner,"eg-qualification-"+p.workflow_id]);
     if(cp.length===1){const saved=JSON.parse(cp[0].value);out.checkpoint={project:"eg-qualification-"+p.workflow_id,revision:cp[0].revision,sha256:saved.sha256,verified:cp[0].revision===1&&s.sha256===saved.sha256&&hash(JSON.stringify(saved.snapshot))===saved.sha256&&saved.snapshot.sha===sha&&saved.snapshot.workflow_id===p.workflow_id,ci:saved.snapshot.ci};}
    }
-   const current=await query("SELECT revision,value FROM eg_checkpoints WHERE owner=? AND project=?",[owner,row.project]);if(current.length){p=JSON.parse(current[0].value);out.revision=current[0].revision;out.tools=p.tools;out.all_tools_valid=p.all_tools_valid===true;out.browser_state=p.state;}
+   const current=await query("SELECT revision,value FROM eg_checkpoints WHERE owner=? AND project=?",[owner,row.project]);if(current.length){p=JSON.parse(current[0].value);out.revision=current[0].revision;out.tools=p.tools;out.group_failures=p.group_failures;out.evidence_prefix=p.evidence_prefix;out.all_tools_valid=p.all_tools_valid===true;out.browser_state=p.state;}
    out.dag_verified=out.states.some(x=>x.id===out.workflow_id&&x.state==="SUCCEEDED")&&out.steps.length===7&&out.steps.every(x=>x.state==="SUCCEEDED"&&x.hash_verified)&&out.checkpoint?.verified===true;
    out.status=out.dag_verified&&out.all_tools_valid?"PASS":"PARTIAL";if(out.status!=="PASS")process.exitCode=1;
   }

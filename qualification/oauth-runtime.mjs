@@ -4,6 +4,7 @@ import { readFileSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Miniflare, createFetchMock } from "miniflare";
+import { mcpSuiteSource } from "../mcp-suite.mjs";
 
 const config=JSON.parse(readFileSync("wrangler.jsonc","utf8"));
 const script=readdirSync(".oauth-build").filter(x=>/\.(m?js)$/.test(x));
@@ -280,6 +281,25 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
   const proofRead=value(await tool(tokens.access_token,"checkpoint_get",{project:proofSaved.checkpoint}));
   ok(proofRead.found&&proofRead.revision===1&&JSON.parse(proofRead.value).snapshot.sha===headSha&&JSON.parse(proofRead.value).sha256===proofSaved.sha256,"release proof checkpoint read through MCP");
   ok(value(await tool(tokens.access_token,"execution_finalize",proofRef)).verified,"release proof independently finalized");
+  if(preview){
+    // Execute the exact shared browser MCP suite against protected workerd,
+    // using simulated upstream GitHub responses only (not a live OAuth claim).
+    const project="eg-qualification-browser-"+crypto.randomUUID(),proofProject=project+"-p",sha="b".repeat(40),target={owner:"19wolfalone92",repo:"Execution-Guard"};
+    const reply=(path,data)=>gh.intercept({path,method:"GET"}).reply(200,JSON.stringify(data),{headers:{"content-type":"application/json"}});
+    const root="/repos/19wolfalone92/Execution-Guard",metadata={id:7,full_name:"19wolfalone92/Execution-Guard",default_branch:"main",private:false,archived:false};
+    reply(root,metadata);reply(root+"/commits/"+sha+"/status",{state:"success",total_count:0,statuses:[]});reply(root+"/actions/runs/123",{id:123,status:"completed",conclusion:"success",head_sha:sha});
+    reply(root,metadata);reply(root+"/git/ref/heads/audit/oauth-e2e-20261125",{ref:"refs/heads/audit/oauth-e2e-20261125",object:{type:"commit",sha}});
+    reply(root+"/actions/runs?head_sha="+sha+"&per_page=100",{total_count:3,workflow_runs:qualificationNames.map((name,i)=>({id:i+201,name,head_sha:sha,status:"completed",conclusion:"success"}))});
+    const inventory=(await rpc(tokens.access_token,"tools/list")).tools;
+    const report={project,proof_project:proofProject,sha,state:"AUTHORIZED",owner_verified:true,refresh:true,tools:Object.fromEntries(inventory.map(t=>[t.name,{valid:false,scope:t.securitySchemes[0].scopes.includes("eg:write")?true:null}]))};let rev=0;
+    const raw=async(access,method,params)=>{const r=await call("/mcp-private",{method:"POST",headers:{"Content-Type":"application/json",...(access?{Authorization:"Bearer "+access}:{})},body:JSON.stringify({jsonrpc:"2.0",id:1234,method,params})});return {http:r.status,data:await r.json().catch(()=>({}))};};
+    const persist=async()=>{const x=value(await tool(tokens.access_token,"checkpoint_put",{project:proofProject,expected_revision:rev,value:JSON.stringify(report)}));assert.equal(x.status,"saved",JSON.stringify(x));rev=x.revision;};
+    await persist();
+    const suite=new Function("return ("+mcpSuiteSource+")")();
+    await suite({rpc:raw,access:tokens.access_token,tools:inventory,report,project,proofProject,persist,uuid:()=>crypto.randomUUID(),digestHex:async x=>createHash("sha256").update(x).digest("hex"),sleep:async()=>{},status:()=>{},fixture:{run_id:123,sha}});
+    console.log("BROWSER SUITE "+JSON.stringify({all:report.all_tools_valid,state:report.state,groups:report.group_failures,tools:report.tools}));
+    ok(report.all_tools_valid&&report.state==="SUCCEEDED"&&report.workflow_evidence?.verified,"same browser suite exercises all 26 tools and DAG on protected workerd");
+  }
   const ownedInventory=(await rpc(tokens.access_token,"tools/list")).tools;
   for(const t of ownedInventory){
     const raw=await call("/mcp-private",{method:"POST",headers:{Authorization:"Bearer "+tokens.access_token,"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1002,method:"tools/call",params:{name:t.name,arguments:{unexpected:true}}})});

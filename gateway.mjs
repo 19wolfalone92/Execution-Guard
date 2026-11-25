@@ -4,6 +4,7 @@ import publicWorker from "./worker.mjs";
 import { HOST, RESOURCE, PREVIEW_HOST, authHost, READ, WRITE, CLIENT, consentHtml, s256, gatewayRoute, configured, previewStorageReady } from "./security.mjs";
 import { privateFetch } from "./private.mjs";
 import { runBatch } from "./tasks.mjs";
+import { githubRepositoryStatus } from "./orchestrator.mjs";
 import { browserClientApproved, provisionBrowserClient, browserQualificationRoute } from "./preview-browser.mjs";
 
 const callbackUrl=env=>authHost(env)+"/callback";
@@ -185,6 +186,16 @@ export default {...gateway,async fetch(request,env,ctx){
     const secret=env.EG_PREVIEW_TICK_SECRET,provided=request.headers.get("Authorization")||"";
     if(typeof secret!=="string"||secret.length<32||provided.length>512||!timingSafeEqual(createHash("sha256").update(provided).digest(),createHash("sha256").update("Bearer "+secret).digest()))return new Response("Forbidden",{status:403});
     if(!await previewStorageReady(env))return new Response("Preview storage not qualified",{status:503});
+    if(url.searchParams.get("diagnostic")==="github"){
+      const trace={};
+      const traced=async (target,options)=>{
+        try{const r=await fetch(target,options);trace.http=r.status;trace.rate_limit_exhausted=r.headers.get("X-RateLimit-Remaining")==="0";trace.retry_after_present=r.headers.has("Retry-After");return r;}
+        catch(e){trace.transport=e?.name==="TimeoutError"?"timeout":e?.name==="TypeError"?"type_error":"network_error";throw e;}
+      };
+      const target={owner:"19wolfalone92",repo:"Execution-Guard"};
+      const result=await githubRepositoryStatus(target,traced);
+      return Response.json({environment:"preview",probe:"github_repository_status",verified:result.verified===true,error:typeof result.error==="string"&&/^[a-z0-9_]{1,80}$/.test(result.error)?result.error:null,retryable:result.retryable===true,trace},{headers:{"Cache-Control":"no-store"}});
+    }
     const api=getOAuthApi(previewOptions,env);
     await provisionRegisteredClient(env,api);
     await provisionBrowserClient(env,api);

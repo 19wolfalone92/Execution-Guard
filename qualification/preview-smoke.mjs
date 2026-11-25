@@ -61,6 +61,7 @@ try{
  check("private_auth_required",unauthorized.status===401);
  const provision=await get(host,"/qualification/tick",{method:"POST",headers:{Authorization:"Bearer "+tick}});
  check("provision_tick",provision.http===200&&provision.body?.status==="tick_completed");
+ const probe=await get(host,"/qualification/tick?diagnostic=github",{method:"POST",headers:{Authorization:"Bearer "+tick}});out.github_worker_probe={http:probe.http,body:probe.body};
  let page;for(let i=0;i<20;i++){try{page=await req(host,"/qualification/oauth");if(page.status===200)break;}catch{}await sleep(3000);}
  check("browser_authorization_ready",page?.status===200&&(await page.text()).includes("Начать проверку"));
  const js=await req(host,"/qualification/oauth.js");check("browser_script_available",js.status===200&&js.headers.get("Content-Type")?.includes("javascript"));
