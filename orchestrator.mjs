@@ -93,7 +93,7 @@ export async function projectGet(db, owner, args) {
 }
 
 export async function projectUpdate(db, owner, args) {
-  if (!allKeys(args,["project","expected_revision","patch"]) || !projectPattern.test(args.project) || !Number.isInteger(args.expected_revision) || args.expected_revision < 1 || !isObject(args.patch) || !Object.keys(args.patch).length) return {error:"invalid_arguments"};
+  if (!allKeys(args,["project","expected_revision","patch"]) || !projectPattern.test(args.project) || !Number.isSafeInteger(args.expected_revision) || args.expected_revision < 1 || args.expected_revision > 2147483646 || !isObject(args.patch) || !Object.keys(args.patch).length) return {error:"invalid_arguments"};
   if (Object.keys(args.patch).some(key => !projectFields.has(key))) return {error:"invalid_project_record"};
   await ensureSchema(db);
   const current = await db.prepare("SELECT revision,value FROM eg_projects WHERE owner=? AND project=?").bind(owner,args.project).first();
@@ -132,7 +132,7 @@ export async function projectResume(db, owner, args) {
 function validateGithubInput(operation, input) {
   if (!isObject(input)) return false;
   if (operation === "health_probe") return Object.keys(input).length === 0;
-  if (operation === "sha256_verify") return allKeys(input,["text","expected_sha256"]) && typeof input.text === "string" && bytes(input.text) <= 4096 && /^[a-f0-9]{64}$/.test(input.expected_sha256);
+  if (operation === "sha256_verify") return allKeys(input,["text","expected_sha256"]) && typeof input.text === "string" && bytes(input.text) <= 4096 && scanForSecrets(input.text) && /^[a-f0-9]{64}$/.test(input.expected_sha256);
   if (operation === "github_repository_status") return allKeys(input,["owner","repo"]) && repoPartPattern.test(input.owner) && repoPartPattern.test(input.repo);
   if (operation === "github_commit_status") return allKeys(input,["owner","repo","sha"]) && repoPartPattern.test(input.owner) && repoPartPattern.test(input.repo) && shaPattern.test(input.sha);
   if (operation === "github_workflow_status") return allKeys(input,["owner","repo","run_id"]) && repoPartPattern.test(input.owner) && repoPartPattern.test(input.repo) && Number.isSafeInteger(input.run_id) && input.run_id > 0;
@@ -177,6 +177,8 @@ export async function workflowCreate(db, owner, args) {
   await ensureSchema(db);
   const project = await db.prepare("SELECT project FROM eg_projects WHERE owner=? AND project=?").bind(owner,args.project).first();
   if (!project) return {error:"project_not_found"};
+  const counts = await db.prepare("SELECT COUNT(*) AS total,SUM(CASE WHEN state NOT IN ('SUCCEEDED','FAILED','CANCELLED') THEN 1 ELSE 0 END) AS active FROM eg_workflows WHERE owner=?").bind(owner).first();
+  if ((counts?.total ?? 0) >= 5000 || (counts?.active ?? 0) >= 100) return {error:"workflow_capacity"};
   const id = crypto.randomUUID(), now = nowIso();
   const statements = [db.prepare("INSERT INTO eg_workflows(id,owner,project,name,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(id,owner,args.project,args.name.trim(),"CREATED",now,now)];
   for (const step of steps) statements.push(db.prepare("INSERT INTO eg_workflow_steps(id,workflow_id,owner,project,step_key,operation,input,depends_on,state,attempts,max_attempts,timeout_ms,available_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'CREATED',0,?,?,0,?,?)").bind(crypto.randomUUID(),id,owner,args.project,step.key,step.operation,JSON.stringify(step.input),JSON.stringify(step.depends_on),step.max_attempts,step.timeout_ms,now,now));
@@ -308,7 +310,8 @@ export async function executionAudit(db, owner, args) {
   return {project:args.project,events:(rows.results||[]).map(row=>({event:row.event,workflow_id:row.workflow_id,details:parseJson(row.details,{}),created_at:row.created_at}))};
 }
 
-export async function systemHealth(db, owner) {
+export async function systemHealth(db, owner, args = {}) {
+  if (!isObject(args) || Object.keys(args).length) return {error:"invalid_arguments"};
   try {
     await ensureSchema(db);
     const probe=await db.prepare("SELECT value FROM eg_probe WHERE id=1").first();
