@@ -6,6 +6,7 @@ const leaseMs=120000;
 const projects=/^[a-z0-9][a-z0-9_-]{0,63}$/;
 const keys=/^[a-zA-Z0-9_-]{8,64}$/;
 const ids=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const secretValue=/(?:gh[pousr]_[A-Za-z0-9_]{20,}|Bearer\s+[A-Za-z0-9._~-]{20,}|-----BEGIN (?:RSA|OPENSSH|EC) PRIVATE KEY-----|AKIA[0-9A-Z]{16})/;
 const schema="CREATE TABLE IF NOT EXISTS eg_tasks (id TEXT PRIMARY KEY, owner TEXT NOT NULL, project TEXT NOT NULL, idem TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','cancelled')), attempts INTEGER NOT NULL DEFAULT 0, available_at INTEGER NOT NULL, lease_id TEXT, lease_until INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result TEXT, error_code TEXT, UNIQUE(owner,project,idem))";
 const index="CREATE INDEX IF NOT EXISTS eg_tasks_dispatch ON eg_tasks(state,available_at,lease_until)";
 const allkeys=(a,k)=>a&&typeof a==="object"&&!Array.isArray(a)&&Object.keys(a).length===k.length&&k.every(v=>Object.hasOwn(a,v));
@@ -17,7 +18,7 @@ const taskView=r=>r?{found:true,task_id:r.id,project:r.project,kind:r.kind,state
 async function lookup(db,owner,project,id){return db.prepare("SELECT id,project,kind,state,attempts,created_at,updated_at,result,error_code FROM eg_tasks WHERE owner=? AND project=? AND id=?").bind(owner,project,id).first();}
 function normalizedPayload(kind,p){
   if(kind==="health_probe"&&allkeys(p,[]))return "{}";
-  if(kind==="sha256_verify"&&allkeys(p,["text","expected_sha256"])&&typeof p.text==="string"&&new TextEncoder().encode(p.text).length<=4096&&typeof p.expected_sha256==="string"&&/^[a-f0-9]{64}$/.test(p.expected_sha256))return JSON.stringify({text:p.text,expected_sha256:p.expected_sha256});
+  if(kind==="sha256_verify"&&allkeys(p,["text","expected_sha256"])&&typeof p.text==="string"&&new TextEncoder().encode(p.text).length<=4096&&!secretValue.test(p.text)&&typeof p.expected_sha256==="string"&&/^[a-f0-9]{64}$/.test(p.expected_sha256))return JSON.stringify({text:p.text,expected_sha256:p.expected_sha256});
   return null;
 }
 export async function taskSubmit(db,owner,args,now=Date.now()){
