@@ -1,3 +1,4 @@
+import { githubReadFetcher } from "./github-read.mjs";
 import { isOwner, READ, WRITE, authHost, PREVIEW_HOST, previewStorageReady } from "./security.mjs";
 import { taskSubmit, taskStatus, taskCancel } from "./tasks.mjs";
 import {
@@ -143,13 +144,13 @@ export async function privateFetch(request,env,ctx) {
       const row=await env.DB.prepare("SELECT value FROM eg_checkpoints WHERE owner=? AND project=?").bind(ctx.props.userId,key).first();
       const proof=row?JSON.parse(row.value):null;
       if(!proof||proof.proof_project!==key||proof.project!==key.slice(0,-2)||proof.sha!==env.EG_RELEASE_SHA||proof.state!=="QUEUED"||proof.owner_verified!==true||!/^([a-f0-9-]{36})$/.test(proof.workflow_id||"")||!/^([a-f0-9-]{36})$/.test(proof.control_id||""))return rpcError(-32602,"No queued qualification session");
-      const result=await runWorkflowBatch(env.DB,ctx.props.userId,1);
+      const result=await runWorkflowBatch(env.DB,ctx.props.userId,1,githubReadFetcher(env));
       return reply({environment:"preview",executed:result.executed});
     }catch{return rpcError(-32603,"Qualification tick failed");}
   }
   if(m.method==="tools/list")return reply({tools});
   if(m.method!=="tools/call")return rpcError(-32601,"Method not found");
-  const name=m.params?.name,args=m.params?.arguments??{},owner=ctx.props.userId;
+  const name=m.params?.name,args=m.params?.arguments===undefined?{}:m.params.arguments,owner=ctx.props.userId;
   const definition=tools.find(t=>t.name===name);
   if(definition&&(!writeNames.has(name)||ctx.auth.scope.includes(WRITE))&&!matchesSchema(args,definition.inputSchema))return rpcError(-32602,"Invalid arguments");
   if(name==="whoami"){if(!validArgs(args,[]))return rpcError(-32602,"Invalid arguments");return result({authenticated:true,owner_verified:true,scopes:ctx.auth.scope});}
@@ -185,7 +186,7 @@ export async function privateFetch(request,env,ctx) {
   if(name==="github_repository_status"||name==="github_commit_status"||name==="github_workflow_status"){
     try{
       const fn={github_repository_status:githubRepositoryStatus,github_commit_status:githubCommitStatus,github_workflow_status:githubWorkflowStatus}[name];
-      const r=await fn(args);
+      const r=await fn(args,githubReadFetcher(env));
       return result(r,!!r.error);
     }catch{return result({error:"github_read_failed"},true);}
   }

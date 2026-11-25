@@ -74,7 +74,7 @@ export async function runNextTask(db,owner,now=Date.now()){
   const update=await db.prepare("UPDATE eg_tasks SET state=?,result=?,error_code=?,available_at=?,lease_id=NULL,lease_until=NULL,updated_at=? WHERE owner=? AND id=? AND lease_id=? AND state='running'").bind(state,result?JSON.stringify(result):null,error,available,Date.now(),owner,row.id,lease).run();
   return {claimed:true,task_id:row.id,committed:update.meta.changes===1};
 }
-export async function runBatch(db,owner,limit=4){
+export async function runBatch(db,owner,limit=4,fetcher=fetch){
   for(let i=0;i<Math.min(limit,4);i++){const r=await runNextTask(db,owner);if(!r.claimed)break;}
-  await runWorkflowBatch(db,owner,limit);
+  await runWorkflowBatch(db,owner,limit,fetcher);
 }

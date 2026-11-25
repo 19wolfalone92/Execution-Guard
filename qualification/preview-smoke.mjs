@@ -34,6 +34,18 @@ try{
    const raw=JSON.stringify(logs.result||"");
    out.automatic_build.logs={http:logs.http,ok:logs.ok,errors:logs.errors,authentication_error:/Authentication error/i.test(raw),authorization_error:/Authorization error/i.test(raw),permission_error:/not authorized|insufficient permission|permission denied/i.test(raw),codes:[...new Set([...raw.matchAll(/\[code:\s*(\d+)\]/g)].map(x=>Number(x[1])))],missing_previews:/missing a.*previews/i.test(raw),quota:/quota|limit exceeded|too many/i.test(raw),rate_limited:/rate.limit|retry_after_ms|10429/i.test(raw)};
  }
+ // Install only the optional, repository-scoped read credential into the named Preview.
+ const gitRead=process.env.EG_PREVIEW_GITHUB_READ_TOKEN;
+ out.github_credential={provided:!!gitRead,installed:false};
+ if(gitRead){
+   // Validate the token against all needed read endpoints before any configuration write.
+   const target="https://api.github.com/repos/"+repo;
+   const headers={Authorization:"Bearer "+gitRead,Accept:"application/vnd.github+json","User-Agent":"eg-qualification","X-GitHub-Api-Version":"2022-11-28"};
+   const responses=await Promise.all(["","/git/ref/heads/"+branch,"/commits/"+sha+"/status","/actions/runs?head_sha="+sha+"&per_page=1"].map(path=>fetch(target+path,{headers,redirect:"error",signal:AbortSignal.timeout(15000)})));
+   out.github_credential.validation_http=responses.map(r=>r.status);check("github_read_credential_valid",responses.every(r=>r.ok));
+   const put=spawnSync("./node_modules/.bin/wrangler",["preview","secret","put","EG_GITHUB_READ_TOKEN","--worker-name","execution-guard","--name",branch],{input:gitRead+"\n",encoding:"utf8",timeout:60000,maxBuffer:1024*1024,env:{PATH:process.env.PATH,HOME:process.env.HOME,CI:"true",CLOUDFLARE_ACCOUNT_ID:account,CLOUDFLARE_API_TOKEN:management,WRANGLER_SEND_METRICS:"false"}});
+   out.github_credential.installed=put.status===0;check("github_read_credential_installed",put.status===0);
+ }
  // Deploy only the isolated named Preview, with exact checked-out SHA in its runtime vars.
  config.previews.vars.EG_RELEASE_SHA=sha;writeFileSync("wrangler.jsonc",JSON.stringify(config,null,2)+"\n");
  const result=spawnSync("./node_modules/.bin/wrangler",["preview","--worker-name","execution-guard","--name",branch,"--tag",sha,"--message","Exact SHA qualification "+sha,"--json"],{encoding:"utf8",timeout:120000,maxBuffer:2*1024*1024,env:{PATH:process.env.PATH,HOME:process.env.HOME,CI:"true",CLOUDFLARE_ACCOUNT_ID:account,CLOUDFLARE_API_TOKEN:management,WRANGLER_SEND_METRICS:"false"}});

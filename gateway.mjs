@@ -1,3 +1,4 @@
+import { githubReadFetcher } from "./github-read.mjs";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { OAuthProvider, AuthorizationError, CimdFetchError, getOAuthApi } from "@cloudflare/workers-oauth-provider";
 import publicWorker from "./worker.mjs";
@@ -193,13 +194,13 @@ export default {...gateway,async fetch(request,env,ctx){
         catch(e){trace.transport=e?.name==="TimeoutError"?"timeout":e?.name==="TypeError"?"type_error":"network_error";throw e;}
       };
       const target={owner:"19wolfalone92",repo:"Execution-Guard"};
-      const result=await githubRepositoryStatus(target,traced);
-      return Response.json({environment:"preview",probe:"github_repository_status",verified:result.verified===true,error:typeof result.error==="string"&&/^[a-z0-9_]{1,80}$/.test(result.error)?result.error:null,retryable:result.retryable===true,trace},{headers:{"Cache-Control":"no-store"}});
+      const result=await githubRepositoryStatus(target,githubReadFetcher(env,traced));
+      return Response.json({environment:"preview",probe:"github_repository_status",credential_configured:!!env.EG_GITHUB_READ_TOKEN,verified:result.verified===true,error:typeof result.error==="string"&&/^[a-z0-9_]{1,80}$/.test(result.error)?result.error:null,retryable:result.retryable===true,trace},{headers:{"Cache-Control":"no-store"}});
     }
     const api=getOAuthApi(previewOptions,env);
     await provisionRegisteredClient(env,api);
     await provisionBrowserClient(env,api);
-    await runBatch(env.DB,env.EG_OWNER_GITHUB_ID);
+    await runBatch(env.DB,env.EG_OWNER_GITHUB_ID,4,githubReadFetcher(env));
     return Response.json({status:"tick_completed",environment:"preview"},{headers:{"Cache-Control":"no-store"}});
   }
   if(url.pathname==="/oauth/client-info"){
@@ -212,7 +213,7 @@ export default {...gateway,async fetch(request,env,ctx){
   return (env.EG_ENVIRONMENT==="preview"?previewGateway:gateway).fetch(request,env,ctx);
 },async scheduled(_event,env,ctx){
   if(env.EG_ENVIRONMENT!=="preview"&&configured(env)){
-    ctx.waitUntil(runBatch(env.DB,env.EG_OWNER_GITHUB_ID));
+    ctx.waitUntil(runBatch(env.DB,env.EG_OWNER_GITHUB_ID,4,githubReadFetcher(env)));
     ctx.waitUntil((async()=>{try{await provisionRegisteredClient(env,getOAuthApi(providerOptions,env));}catch{console.warn("oauth_registered_client_provision_failed");}})());
   }
 }};
