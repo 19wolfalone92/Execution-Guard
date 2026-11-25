@@ -32,6 +32,19 @@ function metadataCategory(error) {
   const status=/^Failed to fetch client metadata: HTTP ([1-5][0-9]{2})\b/.exec(d);
   return status?"client_metadata_http_"+status[1]:"client_metadata";
 }
+// Match only fixed library messages (workers-oauth-provider 1.3.0).
+// Never echo a raw exception, state, cookie, token or callback URL.
+function authorizationCategory(error,stage) {
+  if(stage!=="finish_github_sign_in"&&stage!=="approve_consent"&&stage!=="deny_consent")return "request_rejected";
+  switch(error.description) {
+    case "Missing state parameter": return "missing_state";
+    case "Missing transaction handle": return "missing_handle";
+    case "This authorization was not started in this browser; start again": return "browser_cookie_missing";
+    case "This authorization belongs to a different browser session; start again": return "browser_session_mismatch";
+    case "This authorization expired or was already used; start again": return "transaction_unavailable";
+    default: return "request_rejected";
+  }
+}
 const defaultHandler={async fetch(request,env) {
   const path=new URL(request.url).pathname;
   const oauth=env.OAUTH_PROVIDER;
@@ -65,13 +78,20 @@ const defaultHandler={async fetch(request,env) {
       const url=new URL("https://github.com/login/oauth/authorize");
       for(const [key,value] of Object.entries({client_id:env.GITHUB_CLIENT_ID,redirect_uri:callbackUrl,scope:"read:user",state,code_challenge:await s256(verifier),code_challenge_method:"S256"}))url.searchParams.set(key,value);
       headers.set("Location",url.toString());
-      return new Response(null,{status:302,headers});
+      // Explicitly turn the consent POST into a top-level GET at GitHub.
+      return new Response(null,{status:303,headers});
     }
     if(path==="/callback"&&request.method==="GET"){
       stage="finish_github_sign_in";
       const {request:original,data,headers}=await oauth.finishUpstream(request);
-      const code=new URL(request.url).searchParams.get("code");
-      if(!code||!await approvedClient(env,original.clientId))return new Response("Sign in not completed",{status:400,headers});
+      const params=new URL(request.url).searchParams;
+      const code=params.get("code");
+      if(!await approvedClient(env,original.clientId))return new Response("Client forbidden",{status:403,headers});
+      if(!code){
+        const reason=params.get("error")==="access_denied"?"github_access_denied":params.has("error")?"github_rejected":"missing_code";
+        headers.set("Content-Type","text/plain; charset=utf-8");
+        return new Response("Authorization failed (github_callback / "+reason+")",{status:400,headers});
+      }
       stage="github_token_exchange";
       const token=await fetch("https://github.com/login/oauth/access_token",{method:"POST",redirect:"error",headers:{Accept:"application/json","Content-Type":"application/json"},body:JSON.stringify({client_id:env.GITHUB_CLIENT_ID,client_secret:env.GITHUB_CLIENT_SECRET,code,code_verifier:data.verifier,redirect_uri:callbackUrl})});
       if(!token.ok)return new Response("Sign in failed",{status:403,headers});
@@ -90,7 +110,7 @@ const defaultHandler={async fetch(request,env) {
     return new Response("Not found",{status:404});
   }catch(error){
     // Fixed diagnostic categories only; never log URLs, OAuth state, codes, secrets or raw exceptions.
-    const category=error instanceof CimdFetchError?metadataCategory(error):error instanceof AuthorizationError?"request_rejected":"internal";
+    const category=error instanceof CimdFetchError?metadataCategory(error):error instanceof AuthorizationError?authorizationCategory(error,stage):"internal";
     console.warn(JSON.stringify({event:"oauth_authorization_failed",stage,category}));
     if(error instanceof AuthorizationError && error.redirectTo)return Response.redirect(error.redirectTo,302);
     return new Response("Authorization failed ("+stage+" / "+category+")",{status:400,headers:{"Cache-Control":"no-store","Content-Type":"text/plain; charset=utf-8"}});
