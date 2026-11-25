@@ -22,10 +22,23 @@ export async function s256(value) {
   const digest = await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value));
   return btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
 }
+export async function oauthDiagnostics(env, provider, ctx) {
+  if (!configured(env)) return {configuration:env?.EG_AUTH_ENABLED==="true"?"incomplete":"disabled",discovery:"not_ready"};
+  try {
+    const paths=["/.well-known/oauth-protected-resource/mcp-private","/.well-known/oauth-authorization-server"];
+    const [resource,issuer]=await Promise.all(paths.map(p=>provider.fetch(new Request(HOST+p),env,ctx)));
+    const result={configuration:"ready",resource_http:resource.status,issuer_http:issuer.status,discovery:"invalid"};
+    if(resource.ok&&issuer.ok){
+      const [r,a]=await Promise.all([resource.json(),issuer.json()]);
+      result.discovery=r.resource===RESOURCE&&r.authorization_servers?.includes(a.issuer)&&a.issuer===HOST&&a.authorization_endpoint===HOST+"/authorize"&&a.token_endpoint===HOST+"/oauth/token"&&a.code_challenge_methods_supported?.includes("S256")&&a.client_id_metadata_document_supported===true?"verified":"invalid_metadata";
+    }
+    return result;
+  } catch {return {configuration:"ready",discovery:"provider_error"};}
+}
 export function gatewayRoute(publicWorker, provider) {
   return {async fetch(request,env,ctx) {
     const url = new URL(request.url);
-    if (["/","/health","/mcp"].includes(url.pathname)) return publicWorker.fetch(request,env,ctx);
+    if (["/","/health","/mcp"].includes(url.pathname)) return publicWorker.fetch(request,env,ctx,()=>oauthDiagnostics(env,provider,ctx));
     if (url.pathname === "/mcp-private" || url.pathname === "/authorize" || url.pathname === "/callback" || url.pathname === "/oauth/token" || url.pathname.startsWith("/.well-known/")) {
       if (url.origin !== HOST) return new Response("Unknown host",{status:404});
       if (!configured(env)) return new Response("Private access not configured",{status:503,headers:{"Cache-Control":"no-store"}});
