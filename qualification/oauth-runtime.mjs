@@ -112,7 +112,8 @@ try{
   const init=await rpc(tokens.access_token,"initialize",{protocolVersion:"2025-11-25",capabilities:{},clientInfo:{name:"qualification",version:"1"}});
   ok(init.serverInfo.name==="execution-guard-private"&&init.protocolVersion==="2025-11-25","MCP initialize");
   const notification=await call("/mcp-private",{method:"POST",headers:{Authorization:"Bearer "+tokens.access_token,"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})});ok(notification.status===202,"MCP initialized notification");
-  const tools=await rpc(tokens.access_token,"tools/list");ok(["whoami","checkpoint_get","checkpoint_put","task_submit","task_status","task_cancel"].every(x=>tools.tools.some(t=>t.name===x)),"MCP private tools discovered");
+  const tools=await rpc(tokens.access_token,"tools/list");ok(["whoami","checkpoint_get","checkpoint_put","task_submit","task_status","task_cancel","project_create","project_get","project_update","project_history","project_resume","workflow_create","workflow_start","workflow_status","workflow_pause","workflow_resume","workflow_cancel","workflow_retry","workflow_dependencies_get","task_evidence_get","github_repository_status","github_commit_status","github_workflow_status","execution_audit","execution_finalize","system_health"].every(x=>tools.tools.some(t=>t.name===x)),"MCP private tools discovered");
+  const latestInit=await rpc(tokens.access_token,"initialize",{protocolVersion:"2026-07-28",capabilities:{},clientInfo:{name:"qualification-latest",version:"1"}});ok(latestInit.protocolVersion==="2026-07-28","latest supported MCP protocol version");
   const who=value(await tool(tokens.access_token,"whoami"));ok(who.authenticated&&who.owner_verified&&who.scopes.includes("eg:write"),"authenticated owner and scope");
   const saved=value(await tool(tokens.access_token,"checkpoint_put",{project:"qualification",expected_revision:0,value:"proof"}));ok(saved.status==="saved"&&saved.revision===1,"D1 checkpoint write");
   const got=value(await tool(tokens.access_token,"checkpoint_get",{project:"qualification"}));ok(got.found&&got.value==="proof"&&got.revision===1,"D1 checkpoint readback");
@@ -122,7 +123,60 @@ try{
   await (await mf.getWorker()).scheduled({cron:"*/5 * * * *"});
   let final;
   for(let i=0;i<50;i++){final=value(await tool(tokens.access_token,"task_status",{project:"qualification",task_id:queued.task_id}));if(final.state==="succeeded")break;await new Promise(resolve=>setTimeout(resolve,100));}
-  ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task completed and result verified");
+ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task completed and result verified");
+  const projectCreated=value(await tool(tokens.access_token,"project_create",{project:"workflow-qualification",record:{goal:"Exercise project memory and DAG orchestration in workerd",rules:["Owner-scoped","No secrets"],repository:{owner:"octo",repo:"repo"},stage:"initial"}}));
+  ok(projectCreated.status==="created"&&projectCreated.revision===1,"structured project memory created");
+  const projectRead=value(await tool(tokens.access_token,"project_get",{project:"workflow-qualification"}));
+  ok(projectRead.found&&projectRead.revision===1&&projectRead.record.goal.includes("DAG"),"structured project memory readback");
+  const projectUpdated=value(await tool(tokens.access_token,"project_update",{project:"workflow-qualification",expected_revision:1,patch:{stage:"workerd-qualified"}}));
+  ok(projectUpdated.status==="saved"&&projectUpdated.revision===2,"optimistic project revision update");
+  const projectHistory=value(await tool(tokens.access_token,"project_history",{project:"workflow-qualification",limit:10}));
+  ok(projectHistory.history.length===2&&projectHistory.history[0].revision===2,"project revision history persisted");
+  const projectResume=value(await tool(tokens.access_token,"project_resume",{project:"workflow-qualification"}));
+  ok(projectResume.resume_ready&&projectResume.reconcile_required,"project resume marks external reconciliation");
+  const workflowArgs={project:"workflow-qualification",name:"workerd DAG",idempotency_key:"workerd-dag-2026",steps:[
+    {key:"health",operation:"health_probe",input:{}},
+    {key:"hash",operation:"sha256_verify",input:{text:"proof",expected_sha256:createHash("sha256").update("proof").digest("hex")},depends_on:["health"]}
+  ]};
+  const createdWorkflow=value(await tool(tokens.access_token,"workflow_create",workflowArgs));
+  ok(createdWorkflow.status==="created"&&createdWorkflow.state==="CREATED","DAG workflow created");
+  const duplicateWorkflow=value(await tool(tokens.access_token,"workflow_create",workflowArgs));
+  ok(duplicateWorkflow.status==="existing"&&duplicateWorkflow.deduplicated&&duplicateWorkflow.workflow_id===createdWorkflow.workflow_id,"workflow creation idempotency");
+  const conflictingWorkflow=await tool(tokens.access_token,"workflow_create",{...workflowArgs,name:"different definition"});
+  ok(conflictingWorkflow.isError&&value(conflictingWorkflow).error==="idempotency_conflict","workflow idempotency key cannot bind a different definition");
+  const graph=value(await tool(tokens.access_token,"workflow_dependencies_get",{project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id}));
+  ok(graph.dependencies.find(x=>x.key==="health").dependents.includes("hash"),"workflow dependency graph readback");
+  const startedWorkflow=value(await tool(tokens.access_token,"workflow_start",{project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id}));
+  ok(startedWorkflow.status==="started","workflow start transition");
+  const worker=await mf.getWorker();
+  await worker.scheduled({cron:"*/5 * * * *"});
+  let workflowState;
+  for(let i=0;i<50;i++){
+    workflowState=value(await tool(tokens.access_token,"workflow_status",{project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id}));
+    if(workflowState.workflow?.state==="SUCCEEDED")break;
+    await new Promise(resolve=>setTimeout(resolve,100));
+    await worker.scheduled({cron:"*/5 * * * *"});
+  }
+  ok(workflowState.workflow.state==="SUCCEEDED"&&workflowState.steps.every(x=>x.state==="SUCCEEDED"),"DAG dependencies executed by actual scheduled Worker");
+  const evidence=value(await tool(tokens.access_token,"task_evidence_get",{project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id,step_key:"hash"}));
+  ok(evidence.evidence.verified===true&&typeof evidence.evidence.result_sha256==="string","workflow step evidence stored");
+  const finalized=value(await tool(tokens.access_token,"execution_finalize",{project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id}));
+  ok(finalized.verified===true&&finalized.verified_steps===2,"workflow finalization rechecks result integrity");
+  const audit=value(await tool(tokens.access_token,"execution_audit",{project:"workflow-qualification",limit:20}));
+  ok(audit.events.some(x=>x.event==="workflow_started")&&audit.events.some(x=>x.event==="project_updated"),"workflow and project audit history");
+  const system=value(await tool(tokens.access_token,"system_health"));
+  ok(system.status==="online"&&system.database==="online"&&system.persistence_probe==="verified","MCP system health");
+  const gh=mock.get("https://api.github.com");
+  gh.intercept({path:"/repos/octo/repo",method:"GET"}).reply(200,JSON.stringify({id:7,full_name:"octo/repo",private:false,archived:false,default_branch:"main",updated_at:"2026-11-25T00:00:00Z"}),{headers:{"content-type":"application/json"}});
+  gh.intercept({path:"/repos/octo/repo/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/status",method:"GET"}).reply(200,JSON.stringify({state:"success",total_count:1,statuses:[{context:"ci",state:"success",description:"passed",updated_at:"2026-11-25T00:00:00Z"}]}),{headers:{"content-type":"application/json"}});
+  gh.intercept({path:"/repos/octo/repo/actions/runs/123",method:"GET"}).reply(200,JSON.stringify({id:123,status:"completed",conclusion:"success",run_number:3,head_sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",html_url:"https://github.com/octo/repo/actions/runs/123",updated_at:"2026-11-25T00:00:00Z"}),{headers:{"content-type":"application/json"}});
+  const repoStatus=value(await tool(tokens.access_token,"github_repository_status",{owner:"octo",repo:"repo"}));
+  ok(repoStatus.verified&&repoStatus.repository.default_branch==="main","public GitHub repository read adapter");
+  const commitStatus=value(await tool(tokens.access_token,"github_commit_status",{owner:"octo",repo:"repo",sha:"a".repeat(40)}));
+  ok(commitStatus.verified&&commitStatus.state==="success","public GitHub commit status adapter");
+  const runStatus=value(await tool(tokens.access_token,"github_workflow_status",{owner:"octo",repo:"repo",run_id:123}));
+  ok(runStatus.verified&&runStatus.conclusion==="success","public GitHub Actions run adapter");
+
   const refresh=await tokenRequest({grant_type:"refresh_token",client_id:clientId,refresh_token:tokens.refresh_token,resource});assert.equal(refresh.status,200,await refresh.clone().text());const refreshed=await json(refresh);
   ok(value(await tool(refreshed.access_token,"whoami")).owner_verified,"refreshed token usable");
   // RFC 6749 §10.5: replay of a genuine authorization code revokes its grant and tokens.
