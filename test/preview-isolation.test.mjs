@@ -4,13 +4,25 @@ import {readFileSync} from "node:fs";
 import {gatewayRoute} from "../security.mjs";
 import worker from "../worker.mjs";
 
-test("initial Cloudflare preview is explicitly storage-isolated and OAuth disabled",()=>{
+test("Cloudflare Preview bindings are either absent or explicitly separate from production",()=>{
   const config=JSON.parse(readFileSync(new URL("../wrangler.jsonc",import.meta.url),"utf8"));
-  assert.equal(config.previews.vars.EG_AUTH_ENABLED,"false");
   assert.equal(config.previews.vars.EG_ENVIRONMENT,"preview");
-  assert.equal(config.previews.vars.EG_PREVIEW_READY,"false");
-  assert.deepEqual(config.previews.d1_databases,[]);
-  assert.deepEqual(config.previews.kv_namespaces,[]);
+  const enabled=config.previews.vars.EG_AUTH_ENABLED==="true";
+  if(!enabled){
+    assert.equal(config.previews.vars.EG_AUTH_ENABLED,"false");
+    assert.equal(config.previews.vars.EG_PREVIEW_READY,"false");
+    assert.deepEqual(config.previews.d1_databases,[]);
+    assert.deepEqual(config.previews.kv_namespaces,[]);
+  }else{
+    assert.equal(config.previews.vars.EG_PREVIEW_READY,"true");
+    assert.equal(config.previews.d1_databases.length,1);
+    assert.equal(config.previews.kv_namespaces.length,1);
+    const d=config.previews.d1_databases[0],k=config.previews.kv_namespaces[0];
+    assert.equal(d.binding,"DB");assert.equal(k.binding,"OAUTH_KV");
+    assert.match(d.database_id,/^[a-f0-9-]{36}$/);assert.match(k.id,/^[a-f0-9]{32}$/);
+    assert.ok(config.d1_databases.every(x=>x.database_id!==d.database_id));
+    assert.ok(config.kv_namespaces.every(x=>x.id!==k.id));
+  }
   assert.equal(config.previews.triggers,undefined);
   assert.equal(config.d1_databases.length,1);
   assert.equal(config.kv_namespaces.length,1);

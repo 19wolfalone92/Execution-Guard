@@ -234,6 +234,38 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
   const runStatus=value(await tool(tokens.access_token,"github_workflow_status",{owner:"octo",repo:"repo",run_id:123}));
   ok(runStatus.verified&&runStatus.conclusion==="success","public GitHub Actions run adapter");
 
+  // Actual workerd D1 and protected MCP, simulated GitHub responses only.
+  const qp="eg-qualification-workerd",headSha="a".repeat(40),qualificationNames=["Qualification","OAuth and MCP runtime qualification","Exact Preview HTTP and isolation qualification"];
+  ok(value(await tool(tokens.access_token,"project_create",{project:qp,record:{goal:"Release evidence integration",repository:{owner:"19wolfalone92",repo:"Execution-Guard"}}})).status==="created","release qualification project created");
+  gh.intercept({path:"/repos/19wolfalone92/Execution-Guard",method:"GET"}).reply(200,JSON.stringify({id:7,full_name:"19wolfalone92/Execution-Guard",default_branch:"main",private:false,archived:false}),{headers:{"content-type":"application/json"}});
+  gh.intercept({path:"/repos/19wolfalone92/Execution-Guard/git/ref/heads/audit/oauth-e2e-20261125",method:"GET"}).reply(200,JSON.stringify({ref:"refs/heads/audit/oauth-e2e-20261125",object:{type:"commit",sha:headSha}}),{headers:{"content-type":"application/json"}});
+  gh.intercept({path:"/repos/19wolfalone92/Execution-Guard/actions/runs?head_sha="+headSha+"&per_page=100",method:"GET"}).reply(200,JSON.stringify({total_count:3,workflow_runs:qualificationNames.map((name,i)=>({id:i+101,name,head_sha:headSha,status:"completed",conclusion:"success"}))}),{headers:{"content-type":"application/json"}});
+  const proof=value(await tool(tokens.access_token,"workflow_create",{project:qp,name:"release qualification",idempotency_key:"release-qualification-workerd",steps:[
+    {key:"health",operation:"health_probe",input:{}},
+    {key:"repo",operation:"github_repository_status",input:{owner:"19wolfalone92",repo:"Execution-Guard"}},
+    {key:"head",operation:"github_branch_head",input:{owner:"19wolfalone92",repo:"Execution-Guard",branch:"audit/oauth-e2e-20261125"},depends_on:["repo"]},
+    {key:"ci",operation:"github_actions_for_branch",input:{branch_step:"head"},depends_on:["head"]},
+    {key:"collect",operation:"qualification_collect",depends_on:["health","repo","head","ci"]},
+    {key:"verify",operation:"qualification_verify",depends_on:["collect"]},
+    {key:"save",operation:"qualification_checkpoint",depends_on:["verify"]}
+  ]}));
+  ok(proof.status==="created","seven-stage release proof created through MCP");
+  const proofRef={project:qp,workflow_id:proof.workflow_id};
+  ok(value(await tool(tokens.access_token,"workflow_start",proofRef)).status==="started","release proof queued");
+  let proofState;
+  for(let i=0;i<12;i++){await tick();await new Promise(r=>setTimeout(r,100));proofState=value(await tool(tokens.access_token,"workflow_status",proofRef));if(["SUCCEEDED","FAILED"].includes(proofState.workflow.state))break;}
+  console.log("RELEASE DAG EVIDENCE "+JSON.stringify(proofState));
+  ok(proofState.workflow.state==="SUCCEEDED"&&proofState.steps.length===7&&proofState.steps.every(s=>s.evidence.verified&&s.attempts===1),"all seven release proof steps persisted in actual workerd D1");
+  const proofSaved=proofState.steps.find(s=>s.key==="save").result;
+  const proofRead=value(await tool(tokens.access_token,"checkpoint_get",{project:proofSaved.checkpoint}));
+  ok(proofRead.found&&proofRead.revision===1&&JSON.parse(proofRead.value).snapshot.sha===headSha&&JSON.parse(proofRead.value).sha256===proofSaved.sha256,"release proof checkpoint read through MCP");
+  ok(value(await tool(tokens.access_token,"execution_finalize",proofRef)).verified,"release proof independently finalized");
+  const ownedInventory=(await rpc(tokens.access_token,"tools/list")).tools;
+  for(const t of ownedInventory){
+    const raw=await call("/mcp-private",{method:"POST",headers:{Authorization:"Bearer "+tokens.access_token,"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1002,method:"tools/call",params:{name:t.name,arguments:{unexpected:true}}})});
+    const b=await json(raw);
+    ok(!!b.error||b.result?.isError===true,"invalid arguments rejected even for full-scope owner: "+t.name);
+  }
   const refresh=await tokenRequest({grant_type:"refresh_token",client_id:clientId,refresh_token:tokens.refresh_token,resource});assert.equal(refresh.status,200,await refresh.clone().text());const refreshed=await json(refresh);
   ok(value(await tool(refreshed.access_token,"whoami")).owner_verified,"refreshed token usable");
   // RFC 6749 §10.5: replay of a genuine authorization code revokes its grant and tokens.

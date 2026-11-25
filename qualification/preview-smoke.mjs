@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
+const config=JSON.parse(readFileSync("wrangler.jsonc","utf8"));
+const enabled=config.previews.vars.EG_AUTH_ENABLED==="true";
 const repo="19wolfalone92/Execution-Guard",sha=process.env.GITHUB_SHA;
 assert.match(sha||"",/^[a-f0-9]{40}$/);
 const api=async p=>{const r=await fetch("https://api.github.com/repos/"+repo+p,{headers:{Authorization:"Bearer "+process.env.GITHUB_TOKEN,Accept:"application/vnd.github+json","User-Agent":"eg-preview-qualification"},signal:AbortSignal.timeout(15000)});assert.equal(r.status,200);return r.json();};
@@ -33,6 +36,15 @@ assert.equal((await post("/qualification/tick","ping")).status,404);
 console.log("LIVE PREVIEW HTTP GUARD PASS: "+deployment+" "+sha+"; binding identity still requires account verification.");
 // Keep resource isolation a separate explicit gate. A guard is not proof
 // that a binding is absent or points to a separate database.
-assert.equal(h.storage_guard.d1_binding_present,false,"Unexpected D1 binding; inspect Previews Base");
-assert.equal(h.storage_guard.kv_binding_present,false,"Unexpected KV binding; inspect Previews Base");
-console.log("LIVE PREVIEW EMPTY BINDINGS PASS");
+assert.equal(h.storage_guard.d1_binding_present,enabled,"Unexpected D1 binding; inspect Previews Base");
+assert.equal(h.storage_guard.kv_binding_present,enabled,"Unexpected KV binding; inspect Previews Base");
+if(!enabled)console.log("LIVE PREVIEW EMPTY BINDINGS PASS");
+else{
+  const stable="https://audit-oauth-e2e-20261125-execution-guard.19wolf-alone92.workers.dev";
+  const r=await fetch(stable+"/health",{redirect:"manual",signal:AbortSignal.timeout(15000)});
+  assert.equal(r.status,200);const state=await r.json();
+  assert.equal(state.version,"0.6.0");assert.equal(state.database,"online");assert.equal(state.persistence_probe,"verified");assert.equal(state.oauth_storage,"bound");assert.equal(state.oauth.discovery,"verified");
+  const unauthorized=await fetch(stable+"/mcp-private",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"}),redirect:"manual",signal:AbortSignal.timeout(15000)});
+  assert.equal(unauthorized.status,401);assert.match(unauthorized.headers.get("WWW-Authenticate")||"",/resource_metadata=/);
+  console.log("LIVE PREVIEW MARKERS AND PUBLIC OAUTH DISCOVERY PASS; owner login and refresh require authenticated qualification.");
+}
