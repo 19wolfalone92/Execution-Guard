@@ -281,13 +281,14 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
   const proofRead=value(await tool(tokens.access_token,"checkpoint_get",{project:proofSaved.checkpoint}));
   ok(proofRead.found&&proofRead.revision===1&&JSON.parse(proofRead.value).snapshot.sha===headSha&&JSON.parse(proofRead.value).sha256===proofSaved.sha256,"release proof checkpoint read through MCP");
   ok(value(await tool(tokens.access_token,"execution_finalize",proofRef)).verified,"release proof independently finalized");
-  if(preview){
+  if(preview)for(const rateLimited of [false,true]){
     // Execute the exact shared browser MCP suite against protected workerd,
     // using simulated upstream GitHub responses only (not a live OAuth claim).
     const project="eg-qualification-browser-"+crypto.randomUUID(),proofProject=project+"-p",sha="b".repeat(40),target={owner:"19wolfalone92",repo:"Execution-Guard"};
     const reply=(path,data)=>gh.intercept({path,method:"GET"}).reply(200,JSON.stringify(data),{headers:{"content-type":"application/json"}});
     const root="/repos/19wolfalone92/Execution-Guard",metadata={id:7,full_name:"19wolfalone92/Execution-Guard",default_branch:"main",private:false,archived:false};
-    reply(root,metadata);reply(root+"/commits/"+sha+"/status",{state:"success",total_count:0,statuses:[]});reply(root+"/actions/runs/123",{id:123,status:"completed",conclusion:"success",head_sha:sha});
+    if(rateLimited)gh.intercept({path:root,method:"GET"}).reply(403,JSON.stringify({message:"API rate limit exceeded"}),{headers:{"content-type":"application/json","x-ratelimit-remaining":"0"}});else reply(root,metadata);
+    reply(root+"/commits/"+sha+"/status",{state:"success",total_count:0,statuses:[]});reply(root+"/actions/runs/123",{id:123,status:"completed",conclusion:"success",head_sha:sha});
     reply(root,metadata);reply(root+"/git/ref/heads/audit/oauth-e2e-20261125",{ref:"refs/heads/audit/oauth-e2e-20261125",object:{type:"commit",sha}});
     reply(root+"/actions/runs?head_sha="+sha+"&per_page=100",{total_count:3,workflow_runs:qualificationNames.map((name,i)=>({id:i+201,name,head_sha:sha,status:"completed",conclusion:"success"}))});
     const inventory=(await rpc(tokens.access_token,"tools/list")).tools;
@@ -298,7 +299,8 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
     const suite=new Function("return ("+mcpSuiteSource+")")();
     await suite({rpc:raw,access:tokens.access_token,tools:inventory,report,project,proofProject,persist,uuid:()=>crypto.randomUUID(),digestHex:async x=>createHash("sha256").update(x).digest("hex"),sleep:async()=>{},status:()=>{},fixture:{run_id:123,sha}});
     console.log("BROWSER SUITE "+JSON.stringify({all:report.all_tools_valid,state:report.state,groups:report.group_failures,tools:report.tools}));
-    ok(report.all_tools_valid&&report.state==="SUCCEEDED"&&report.workflow_evidence?.verified,"same browser suite exercises all 26 tools and DAG on protected workerd");
+    if(rateLimited){ok(!report.all_tools_valid&&report.tools.github_repository_status.failed===true&&Object.entries(report.tools).filter(([n])=>n!=="github_repository_status").every(([,v])=>v.valid)&&report.state==="SUCCEEDED"&&report.workflow_evidence?.verified,"simulated GitHub 403 is isolated; other 25 tools and DAG continue");}
+    else ok(report.all_tools_valid&&report.state==="SUCCEEDED"&&report.workflow_evidence?.verified,"same browser suite exercises all 26 tools and DAG on protected workerd");
   }
   const ownedInventory=(await rpc(tokens.access_token,"tools/list")).tools;
   for(const t of ownedInventory){
