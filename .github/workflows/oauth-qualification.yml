@@ -30,8 +30,6 @@ jobs:
           npm audit --omit=dev --audit-level=high
       - name: Bundle exactly as a Workers deployment (no deploy)
         run: npx wrangler deploy --dry-run --outdir .oauth-build
-      - name: Verify immutable previously deployed Preview (live HTTP)
-        run: node qualification/preview-smoke.mjs
       - name: Exercise OAuth and protected MCP flow using workerd
         run: node qualification/oauth-runtime.mjs
       - name: Exercise isolated Preview issuer and secret-gated tick in workerd

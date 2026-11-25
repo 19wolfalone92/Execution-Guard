@@ -1,14 +1,38 @@
 import assert from "node:assert/strict";
-const host="https://b9159ddf-execution-guard.19wolf-alone92.workers.dev";
-const request=(p,opts={})=>fetch(host+p,{...opts,redirect:"manual",signal:AbortSignal.timeout(15000)});
+const repo="19wolfalone92/Execution-Guard",sha=process.env.GITHUB_SHA;
+assert.match(sha||"",/^[a-f0-9]{40}$/);
+const api=async p=>{const r=await fetch("https://api.github.com/repos/"+repo+p,{headers:{Authorization:"Bearer "+process.env.GITHUB_TOKEN,Accept:"application/vnd.github+json","User-Agent":"eg-preview-qualification"},signal:AbortSignal.timeout(15000)});assert.equal(r.status,200);return r.json();};
+let deployment,build;
+for(let i=0;i<36;i++){
+  const checks=await api("/commits/"+sha+"/check-runs");build=checks.check_runs.find(x=>x.name==="Workers Builds: execution-guard");
+  if(build?.status==="completed"&&build.conclusion!=="success")assert.fail("Cloudflare build failed: "+build.details_url);
+  const comments=await api("/issues/5/comments?per_page=100");
+  for(const c of comments.filter(x=>x.user?.login==="cloudflare-workers-and-pages[bot]")){
+    for(const row of c.body.match(/<tr>[\s\S]*?<\/tr>/g)||[]){
+      if(row.includes("<td>"+sha.slice(0,7)+"</td>")&&row.includes("Deployment:</b> Success")){
+        deployment=row.match(/https:\/\/[a-f0-9]{8}-execution-guard\.19wolf-alone92\.workers\.dev/)?.[0];
+      }
+    }
+  }
+  if(deployment&&build?.conclusion==="success")break;
+  await new Promise(r=>setTimeout(r,10000));
+}
+assert.ok(deployment&&build?.conclusion==="success","Exact SHA deployment missing");
+const request=(p,opts={})=>fetch(deployment+p,{...opts,redirect:"manual",signal:AbortSignal.timeout(15000)});
 const health=await request("/health");assert.equal(health.status,200);
-const h=await health.json();
+const h=await health.json();console.log("PREVIEW EVIDENCE "+JSON.stringify({sha,deployment,build:build.details_url,health:h}));
 assert.equal(h.version,"0.6.0");assert.equal(h.status,"online");
 assert.equal(h.database,"not_verified");assert.equal(h.persistence_probe,"not_verified");
-assert.equal(h.oauth_storage,"not_bound");assert.equal(h.oauth.configuration,"disabled");
+assert.equal(h.oauth_storage,"not_bound");assert.equal(h.oauth.configuration,"disabled");assert.equal(h.storage_guard?.state,"blocked");
 const post=(p,method,params={})=>request(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params})});
 const init=await post("/mcp","initialize",{protocolVersion:"2025-11-25"});assert.equal(init.status,200);assert.equal((await init.json()).result.serverInfo.version,"0.6.0");
 const list=await post("/mcp","tools/list");assert.equal(list.status,200);assert.deepEqual((await list.json()).result.tools.map(t=>t.name),["server_status"]);
 assert.equal((await post("/mcp-private","tools/list")).status,404);
 assert.equal((await request("/.well-known/oauth-authorization-server")).status,404);
-console.log("LIVE PREVIEW SMOKE PASS: deployment b9159ddf-d6f9-48c0-8e7b-90046df4528b commit 4564b8b, version "+h.version+", no D1/KV, private MCP and OAuth fail closed.");
+assert.equal((await post("/qualification/tick","ping")).status,404);
+console.log("LIVE PREVIEW HTTP GUARD PASS: "+deployment+" "+sha+"; binding identity still requires account verification.");
+// Keep resource isolation a separate explicit gate. A guard is not proof
+// that a binding is absent or points to a separate database.
+assert.equal(h.storage_guard.d1_binding_present,false,"Unexpected D1 binding; inspect Previews Base");
+assert.equal(h.storage_guard.kv_binding_present,false,"Unexpected KV binding; inspect Previews Base");
+console.log("LIVE PREVIEW EMPTY BINDINGS PASS");

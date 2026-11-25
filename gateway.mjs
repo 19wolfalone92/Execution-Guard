@@ -1,7 +1,7 @@
 import { timingSafeEqual, createHash } from "node:crypto";
 import { OAuthProvider, AuthorizationError, CimdFetchError, getOAuthApi } from "@cloudflare/workers-oauth-provider";
 import publicWorker from "./worker.mjs";
-import { HOST, RESOURCE, PREVIEW_HOST, authHost, READ, WRITE, CLIENT, consentHtml, s256, gatewayRoute, configured } from "./security.mjs";
+import { HOST, RESOURCE, PREVIEW_HOST, authHost, READ, WRITE, CLIENT, consentHtml, s256, gatewayRoute, configured, previewStorageReady } from "./security.mjs";
 import { privateFetch } from "./private.mjs";
 import { runBatch } from "./tasks.mjs";
 
@@ -175,6 +175,7 @@ export default {...gateway,async fetch(request,env,ctx){
     if(request.method!=="POST")return new Response(null,{status:405});
     const secret=env.EG_PREVIEW_TICK_SECRET,provided=request.headers.get("Authorization")||"";
     if(typeof secret!=="string"||secret.length<32||provided.length>512||!timingSafeEqual(createHash("sha256").update(provided).digest(),createHash("sha256").update("Bearer "+secret).digest()))return new Response("Forbidden",{status:403});
+    if(!await previewStorageReady(env))return new Response("Preview storage not qualified",{status:503});
     await provisionRegisteredClient(env,getOAuthApi(previewOptions,env));
     await runBatch(env.DB,env.EG_OWNER_GITHUB_ID);
     return Response.json({status:"tick_completed",environment:"preview"},{headers:{"Cache-Control":"no-store"}});
@@ -182,7 +183,7 @@ export default {...gateway,async fetch(request,env,ctx){
   if(url.pathname==="/oauth/client-info"){
     if(url.origin!==authHost(env))return new Response("Unknown host",{status:404});
     if(request.method!=="GET")return new Response(null,{status:405});
-    if(!configured(env))return new Response("Private access not configured",{status:503});
+    if(!configured(env)||(env.EG_ENVIRONMENT==="preview"&&!await previewStorageReady(env)))return new Response("Private access not configured",{status:503});
     const id=await registeredId(env);
     return new Response(JSON.stringify(id?{status:"ready",client_id:id,redirect_uri:chatgptRedirect,token_endpoint_auth_method:"none"}:{status:"pending"}),{status:id?200:503,headers:{"Content-Type":"application/json","Cache-Control":"no-store"}});
   }

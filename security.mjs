@@ -12,6 +12,15 @@ export function configured(env) {
   return (!env?.EG_ENVIRONMENT || env.EG_ENVIRONMENT==="production" || (env.EG_ENVIRONMENT==="preview" && env.EG_PREVIEW_READY==="true")) && env?.EG_AUTH_ENABLED === "true" && /^\d+$/.test(env.EG_OWNER_GITHUB_ID || "") &&
     Boolean(env.OAUTH_KV && env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET && env.DB);
 }
+// A configuration flag alone cannot establish storage isolation. Separate
+// test resources must carry both markers before any private Preview operation.
+export async function previewStorageReady(env) {
+  if(env?.EG_ENVIRONMENT!=="preview"||!configured(env))return false;
+  try {
+    const [d,k]=await Promise.all([env.DB.prepare("SELECT value FROM eg_preview_identity WHERE id=1").first(),env.OAUTH_KV.get("eg:preview:identity")]);
+    return d?.value==="execution-guard-preview-v1"&&k==="execution-guard-preview-v1";
+  } catch {return false;}
+}
 export function isOwner(env, ctx) {
   return configured(env) && typeof ctx?.props?.userId === "string" &&
     ctx.props.userId === env.EG_OWNER_GITHUB_ID && Array.isArray(ctx?.auth?.scope);
@@ -44,10 +53,18 @@ export async function oauthDiagnostics(env, provider, ctx) {
 export function gatewayRoute(publicWorker, provider) {
   return {async fetch(request,env,ctx) {
     const url = new URL(request.url);
-    if (["/","/health","/mcp"].includes(url.pathname)) return publicWorker.fetch(request,env,ctx,()=>oauthDiagnostics(env,provider,ctx));
+    if (["/","/health","/mcp"].includes(url.pathname)) {
+      const production=url.origin===HOST&&env?.EG_ENVIRONMENT!=="preview";
+      const isolated=url.origin===PREVIEW_HOST&&await previewStorageReady(env);
+      if(production||isolated)return publicWorker.fetch(request,env,ctx,()=>oauthDiagnostics(env,provider,ctx));
+      // Cloudflare can supply unexpected bindings from Previews Base. Do not
+      // read them, even for health. Report their presence, not their contents.
+      const safe={EG_AUTH_ENABLED:"false",EG_STORAGE_GUARD:{state:"blocked",d1_binding_present:Boolean(env?.DB),kv_binding_present:Boolean(env?.OAUTH_KV)}};
+      return publicWorker.fetch(request,safe,ctx,()=>oauthDiagnostics(safe,provider,ctx));
+    }
     if (url.pathname === "/mcp-private" || url.pathname === "/authorize" || url.pathname === "/callback" || url.pathname === "/oauth/token" || url.pathname.startsWith("/.well-known/")) {
       if (url.origin !== authHost(env)) return new Response("Unknown host",{status:404});
-      if (!configured(env)) return new Response("Private access not configured",{status:503,headers:{"Cache-Control":"no-store"}});
+      if (!configured(env)||(env.EG_ENVIRONMENT==="preview"&&!await previewStorageReady(env))) return new Response("Private access not configured",{status:503,headers:{"Cache-Control":"no-store"}});
       return provider.fetch(request,env,ctx);
     }
     return new Response("Not found",{status:404});

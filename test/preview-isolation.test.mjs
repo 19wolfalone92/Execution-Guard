@@ -33,3 +33,14 @@ test("storage-free preview reports unverified data and rejects private requests"
   const rpc=await gateway.fetch(new Request(host+"/mcp",{method:"POST",body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"})}),env,{});
   assert.deepEqual((await rpc.json()).result.tools.map(t=>t.name),["server_status"]);
 });
+
+test("unexpected preview bindings are reported but never accessed",async()=>{
+  const fail=()=>{throw Error("unexpected storage access")};
+  const gateway=gatewayRoute(worker,{fetch:fail});
+  const host="https://audit-oauth-e2e-20261125-execution-guard.19wolf-alone92.workers.dev";
+  const env={EG_ENVIRONMENT:"preview",EG_PREVIEW_READY:"false",EG_AUTH_ENABLED:"false",DB:{prepare:fail},OAUTH_KV:{get:fail}};
+  const h=await (await gateway.fetch(new Request(host+"/health"),env,{})).json();
+  assert.equal(h.database,"not_verified");
+  assert.deepEqual(h.storage_guard,{state:"blocked",d1_binding_present:true,kv_binding_present:true});
+  assert.equal((await gateway.fetch(new Request(host+"/mcp-private",{method:"POST",body:"{}"}),env,{})).status,503);
+});

@@ -21,6 +21,7 @@ async function status(env, diagnose) {
     database,
     persistence_probe,
     oauth_storage: typeof env?.OAUTH_KV?.get === "function" ? "bound" : "not_bound",
+    ...(env?.EG_STORAGE_GUARD ? {storage_guard:env.EG_STORAGE_GUARD} : {}),
     ...(diagnose ? {oauth:await diagnose()} : {}),
     timestamp: new Date().toISOString()
   };

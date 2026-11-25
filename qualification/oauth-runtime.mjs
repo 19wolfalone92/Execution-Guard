@@ -33,6 +33,11 @@ let mf=new Miniflare(options(baselinePath||candidatePath));
 async function switchWorker(path){await mf.dispose();mf=new Miniflare(options(path));await mf.ready;}
 const testDb=await mf.getD1Database("DB");
 await testDb.exec(readFileSync("probe.sql","utf8"));
+if(preview){
+  await testDb.exec("CREATE TABLE eg_preview_identity(id INTEGER PRIMARY KEY,value TEXT NOT NULL);");
+  await testDb.exec("INSERT INTO eg_preview_identity(id,value) VALUES(1,'execution-guard-preview-v1');");
+  await (await mf.getKVNamespace("OAUTH_KV")).put("eg:preview:identity","execution-guard-preview-v1");
+}
 let checks=0;
 function ok(condition,label){assert.ok(condition,label);checks++;console.log("PASS "+label);}
 const sha=v=>createHash("sha256").update(v).digest("base64url");
