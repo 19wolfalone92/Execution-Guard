@@ -18,5 +18,11 @@
     "crons": [
       "*/5 * * * *"
     ]
-  }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "d3767e65d3924038abb362c607a4dcf3"
+    }
+  ]
 }
