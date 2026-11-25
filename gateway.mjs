@@ -6,7 +6,7 @@ import publicWorker from "./worker.mjs";
 import { HOST, RESOURCE, PREVIEW_HOST, authHost, READ, WRITE, CLIENT, consentHtml, s256, gatewayRoute, configured, previewStorageReady } from "./security.mjs";
 import { privateFetch } from "./private.mjs";
 import { runBatch } from "./tasks.mjs";
-import { githubRepositoryStatus } from "./orchestrator.mjs";
+import { githubRepositoryStatus, executionFinalize } from "./orchestrator.mjs";
 import { browserClientApproved, provisionBrowserClient, browserQualificationRoute } from "./preview-browser.mjs";
 
 const callbackUrl=env=>authHost(env)+"/callback";
@@ -188,6 +188,11 @@ export default {...gateway,async fetch(request,env,ctx){
     const secret=env.EG_PREVIEW_TICK_SECRET,provided=request.headers.get("Authorization")||"";
     if(typeof secret!=="string"||secret.length<32||provided.length>512||!timingSafeEqual(createHash("sha256").update(provided).digest(),createHash("sha256").update("Bearer "+secret).digest()))return new Response("Forbidden",{status:403});
     if(!await previewStorageReady(env))return new Response("Preview storage not qualified",{status:503});
+    if(url.searchParams.get("diagnostic")==="prior-proof"){
+      if(env.EG_PREVIEW_BROWSER_QUALIFICATION!=="true")return new Response("Not found",{status:404});
+      const result=await executionFinalize(env.DB,env.EG_OWNER_GITHUB_ID,{project:"eg-qualification-browser-a34bbee1-4df0-4938-9f42-7c8751e44f50",workflow_id:"15992bad-d1dd-4b48-98cb-5b57c6ec635b"});
+      return Response.json({environment:"preview",current_sha:env.EG_RELEASE_SHA,prior_sha:"517d31587779cd648d0f00eba01265d50914ff8d",verified:result.verified===true,steps:result.steps,verified_steps:result.verified_steps},{headers:{"Cache-Control":"no-store"}});
+    }
     if(url.searchParams.get("diagnostic")==="recovery"){
       if(env.EG_PREVIEW_BROWSER_QUALIFICATION!=="true")return new Response("Not found",{status:404});
       try{return Response.json(await recoveryQualification(env.DB,url.searchParams),{headers:{"Cache-Control":"no-store"}});}

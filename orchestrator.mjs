@@ -220,10 +220,23 @@ async function loadWorkflow(db, owner, project, id) {
   return db.prepare("SELECT * FROM eg_workflows WHERE owner=? AND project=? AND id=?").bind(owner,project,id).first();
 }
 async function loadSteps(db, owner, project, id) {
-  const rows = await db.prepare("SELECT * FROM eg_workflow_steps WHERE owner=? AND project=? AND workflow_id=? ORDER BY created_at,step_key").bind(owner,project,id).all();
+  const rows = await db.prepare("SELECT rowid AS definition_order,* FROM eg_workflow_steps WHERE owner=? AND project=? AND workflow_id=? ORDER BY created_at,step_key").bind(owner,project,id).all();
   return rows.results || [];
 }
 
+// Reconstruct the originally hashed normalized definition in insertion order.
+function definitionIntact(workflow,rows){
+ try{
+  if(!workflow||!rows.length||rows.some(r=>!Number.isSafeInteger(r.definition_order)))return false;
+  const steps=rows.slice().sort((a,b)=>a.definition_order-b.definition_order).map(r=>({key:r.step_key,operation:r.operation,input:JSON.parse(r.input),depends_on:JSON.parse(r.depends_on),max_attempts:r.max_attempts,timeout_ms:r.timeout_ms}));
+  const normalized=validateSteps(steps);
+  return !!normalized&&validateQualification(normalized,workflow.project)&&createHash("sha256").update(JSON.stringify({name:workflow.name,steps:normalized}),"utf8").digest("hex")===workflow.definition_hash;
+ }catch{return false;}
+}
+async function markDefinitionFailure(db,owner,project,id){
+ const stamp=nowIso();
+ await db.prepare("UPDATE eg_workflows SET state='FAILED',error_code='workflow_definition_corrupt',updated_at=?,finished_at=? WHERE owner=? AND project=? AND id=? AND state NOT IN ('SUCCEEDED','CANCELLED','PAUSED','FAILED')").bind(stamp,stamp,owner,project,id).run();
+}
 export async function workflowStart(db, owner, args) {
   if (!allKeys(args,["project","workflow_id"]) || !projectPattern.test(args.project) || !workflowIdPattern.test(args.workflow_id)) return {error:"invalid_arguments"};
   await ensureSchema(db);
@@ -484,6 +497,7 @@ async function refreshWorkflowState(db, owner, project, workflowId) {
   const workflow=await loadWorkflow(db,owner,project,workflowId);
   if(!workflow || ["PAUSED","CANCELLED","SUCCEEDED"].includes(workflow.state))return;
   const steps=await loadSteps(db,owner,project,workflowId);
+  if(!definitionIntact(workflow,steps)){await markDefinitionFailure(db,owner,project,workflowId);return;}
   let state=workflow.state,errorCode=null,finishedAt=null;
   if(steps.some(step=>step.state==="FAILED")){state="FAILED";errorCode="step_failed";finishedAt=nowIso();}
   else if(steps.length&&steps.every(step=>step.state==="SUCCEEDED"&&parseJson(step.evidence,{verified:false}).verified===true)){state="SUCCEEDED";finishedAt=nowIso();}
@@ -502,13 +516,15 @@ export async function runWorkflowBatch(db, owner, limit=4, fetcher=fetch, now=Da
   // a Worker can stop after the last child is persisted, before parent refresh.
   const stamp=nowIso();
   await db.prepare("UPDATE eg_workflows SET state='FAILED',error_code='step_failed',updated_at=?,finished_at=? WHERE owner=? AND state IN ('QUEUED','RUNNING','RETRYING','BLOCKED') AND EXISTS(SELECT 1 FROM eg_workflow_steps s WHERE s.workflow_id=eg_workflows.id AND s.state='FAILED')").bind(stamp,stamp,owner).run();
-  await db.prepare("UPDATE eg_workflows SET state='SUCCEEDED',error_code=NULL,updated_at=?,finished_at=? WHERE owner=? AND state IN ('QUEUED','RUNNING','RETRYING','BLOCKED') AND EXISTS(SELECT 1 FROM eg_workflow_steps s WHERE s.workflow_id=eg_workflows.id) AND NOT EXISTS(SELECT 1 FROM eg_workflow_steps s WHERE s.workflow_id=eg_workflows.id AND (s.state<>'SUCCEEDED' OR COALESCE(CASE WHEN json_valid(s.evidence) THEN json_extract(s.evidence,'$.verified') END,0)<>1))").bind(stamp,stamp,owner).run();
+  const completed=await db.prepare("SELECT id,project FROM eg_workflows WHERE owner=? AND state IN ('QUEUED','RUNNING','RETRYING','BLOCKED') AND EXISTS(SELECT 1 FROM eg_workflow_steps s WHERE s.workflow_id=eg_workflows.id) AND NOT EXISTS(SELECT 1 FROM eg_workflow_steps s WHERE s.workflow_id=eg_workflows.id AND (s.state<>'SUCCEEDED' OR COALESCE(CASE WHEN json_valid(s.evidence) THEN json_extract(s.evidence,'$.verified') END,0)<>1)) LIMIT 4").bind(owner).all();
+  for(const w of completed.results||[])await refreshWorkflowState(db,owner,w.project,w.id);
   let executed=0;
   for(let count=0;count<Math.min(limit,8);count++){
-    const workflows=await db.prepare("SELECT id,project FROM eg_workflows WHERE owner=? AND state IN ('QUEUED','RUNNING','RETRYING','BLOCKED') ORDER BY created_at LIMIT 50").bind(owner).all();
+    const workflows=await db.prepare("SELECT id,project,name,definition_hash FROM eg_workflows WHERE owner=? AND state IN ('QUEUED','RUNNING','RETRYING','BLOCKED') ORDER BY created_at LIMIT 50").bind(owner).all();
     let candidate=null;
     for(const workflow of workflows.results||[]){
       const steps=await loadSteps(db,owner,workflow.project,workflow.id);
+      if(!definitionIntact(workflow,steps)){await markDefinitionFailure(db,owner,workflow.project,workflow.id);continue;}
       const byKey=new Map(steps.map(step=>[step.step_key,step]));
       for(const step of steps){
         if(step.state!=="BLOCKED")continue;
@@ -578,7 +594,8 @@ export async function executionFinalize(db, owner, args) {
   });
   if(verified){
     const rows=await loadSteps(db,owner,args.project,args.workflow_id);
-    verified=rows.every(row=>{
+    const workflow=await loadWorkflow(db,owner,args.project,args.workflow_id);
+    verified=definitionIntact(workflow,rows)&&rows.every(row=>{
       const input=parseJson(row.input),result=parseJson(row.result);
       if(!input||!result)return false;
       if(row.operation==="sha256_verify")return result.sha256===digestOf(input.text)&&result.expected_sha256===input.expected_sha256&&result.sha256===input.expected_sha256;

@@ -7,7 +7,7 @@ export async function remoteRecovery(host,tick){
   const body=await r.json().catch(()=>({status:"INVALID_RESPONSE"}));
   (matrix[scenario]??={calls:[]}).calls.push({http:r.status,...body});assert.ok(r.ok&&body.status==="OBSERVED",scenario+":"+phase);return body;
  };
- for(const scenario of ["lease","concurrent","429","503","timeout","backoff","exhaust","dependency","cancel_running","cancel_queued","tamper","memory","stale"]){
+ for(const scenario of ["lease","concurrent","429","503","timeout","backoff","exhaust","dependency","cancel_running","cancel_queued","tamper","memory","stale","missing_step"]){
   ids[scenario]=randomUUID();const m=matrix[scenario]={calls:[]};
   try{
    const start=await request(scenario,"setup");let final;
@@ -24,7 +24,8 @@ export async function remoteRecovery(host,tick){
      final=await request(scenario,"advance");
      if(scenario==="backoff"){assert.equal(final.steps[0].state,"RETRYING");assert.ok(final.steps[0].available_at-final.scheduler_clock>=2000);await request(scenario,"advance",true);final=await request(scenario,"advance");assert.equal(final.steps[0].attempts,3);}
      assert.equal(final.workflow_state,scenario==="exhaust"?"FAILED":"SUCCEEDED");assert.equal(final.steps[0].attempts,scenario==="backoff"?3:2);
-    }else if(scenario==="dependency"){assert.equal(first.workflow_state,"FAILED");assert.equal(first.steps.find(s=>s.key==="dependent").attempts,0);assert.equal((await request(scenario,"advance")).executed,0);}
+    }else if(scenario==="missing_step"){assert.equal(first.executed,0);assert.equal(first.workflow_state,"FAILED");assert.equal(first.workflow_error,"workflow_definition_corrupt");}
+    else if(scenario==="dependency"){assert.equal(first.workflow_state,"FAILED");assert.equal(first.steps.find(s=>s.key==="dependent").attempts,0);assert.equal((await request(scenario,"advance")).executed,0);}
     else if(scenario==="cancel_running"){assert.equal(first.workflow_state,"CANCELLED");assert.equal(first.steps[0].state,"CANCELLED");}
     else if(scenario==="tamper"){assert.equal(first.workflow_state,"SUCCEEDED");final=await request(scenario,"tamper");}
     else if(scenario==="lease"||scenario==="stale"){assert.equal(first.workflow_state,"SUCCEEDED");assert.equal(first.steps[0].attempts,2);}

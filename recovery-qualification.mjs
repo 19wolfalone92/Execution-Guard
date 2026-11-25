@@ -3,7 +3,7 @@
 import {createHash} from "node:crypto";
 import {projectCreate,projectGet,projectUpdate,projectHistory,projectResume,workflowCreate,workflowStart,workflowStatus,workflowCancel,runWorkflowBatch,executionFinalize} from "./orchestrator.mjs";
 import {taskSubmit,taskStatus} from "./tasks.mjs";
-const cases=new Set(["lease","concurrent","429","503","timeout","backoff","exhaust","dependency","cancel_running","cancel_queued","tamper","memory","stale"]);
+const cases=new Set(["lease","concurrent","429","503","timeout","backoff","exhaust","dependency","cancel_running","cancel_queued","tamper","memory","stale","missing_step"]);
 const hash=s=>createHash("sha256").update(s).digest("hex");
 const target={owner:"octo",repo:"repo"};
 const okFetch=async()=>Response.json({id:7,full_name:"octo/repo",default_branch:"main",private:false,archived:false});
@@ -15,7 +15,7 @@ export async function recoveryQualification(db,params){
  const check=(k,v)=>{result.checks[k]=Boolean(v);};
  const external=["429","503","timeout","backoff","exhaust","cancel_running","stale"].includes(scenario);
  const step=external?{key:"repo",operation:"github_repository_status",input:target,max_attempts:scenario==="exhaust"?2:3,timeout_ms:1000}:{key:"hash",operation:"sha256_verify",input:{text:"abc",expected_sha256:scenario==="dependency"?"0".repeat(64):hash("abc")},max_attempts:3};
- const steps=[step];if(scenario==="dependency")steps.push({key:"dependent",operation:"health_probe",input:{},depends_on:["hash"]});
+ const steps=[step];if(scenario==="missing_step")steps.push({...step,key:"second"});if(scenario==="dependency")steps.push({key:"dependent",operation:"health_probe",input:{},depends_on:["hash"]});
  const args={project,name:"Recovery "+scenario,idempotency_key:"recovery-"+id,steps};
  if(phase==="setup"){
   const p=await projectCreate(db,owner,{project,record:{goal:"Isolated recovery "+scenario,repository:target,stage:"created",rules:["Fixture only"]}});
@@ -23,6 +23,7 @@ export async function recoveryQualification(db,params){
   const w=await workflowCreate(db,owner,args);check("workflow_created",w.status==="created");if(!w.workflow_id)return {...result,status:"FAIL"};
   ref.workflow_id=w.workflow_id;result.workflow_id=w.workflow_id;check("started",(await workflowStart(db,owner,ref)).status==="started");
   if(scenario==="lease"){await db.prepare("UPDATE eg_workflow_steps SET state='RUNNING',attempts=1,lease_id='expired-fixture',lease_until=? WHERE owner=? AND project=? AND workflow_id=?").bind(Date.now()-1,owner,project,w.workflow_id).run();await db.prepare("UPDATE eg_workflows SET state='RUNNING' WHERE owner=? AND project=? AND id=?").bind(owner,project,w.workflow_id).run();}
+  if(scenario==="missing_step")await db.prepare("DELETE FROM eg_workflow_steps WHERE owner=? AND project=? AND workflow_id=? AND step_key='second'").bind(owner,project,w.workflow_id).run();
   if(scenario==="cancel_queued")check("cancelled",(await workflowCancel(db,owner,ref)).status==="cancelled");
   if(scenario==="memory"){
    check("revision_two",(await projectUpdate(db,owner,{project,expected_revision:1,patch:{stage:"saved",evidence:[{workflow_id:w.workflow_id}]}})).revision===2);
@@ -83,7 +84,7 @@ export async function recoveryQualification(db,params){
  }
  const w=await workflowStatus(db,owner,ref);
  const leases=(await db.prepare("SELECT step_key,available_at,lease_id,lease_until FROM eg_workflow_steps WHERE owner=? AND project=? AND workflow_id=?").bind(owner,project,ref.workflow_id).all()).results||[];
- result.workflow_state=w.workflow?.state;result.steps=(w.steps||[]).map(s=>({id:s.id,key:s.key,state:s.state,attempts:s.attempts,error_code:s.error_code,updated_at:s.updated_at,verified:s.evidence?.verified===true,available_at:leases.find(l=>l.step_key===s.key)?.available_at,lease_released:!leases.find(l=>l.step_key===s.key)?.lease_id}));
+ result.workflow_state=w.workflow?.state;result.workflow_error=w.workflow?.error_code;result.steps=(w.steps||[]).map(s=>({id:s.id,key:s.key,state:s.state,attempts:s.attempts,error_code:s.error_code,updated_at:s.updated_at,verified:s.evidence?.verified===true,available_at:leases.find(l=>l.step_key===s.key)?.available_at,lease_released:!leases.find(l=>l.step_key===s.key)?.lease_id}));
  if(scenario==="stale"&&phase==="advance")check("stale_result_rejected",w.steps[0]?.result?.repository?.default_branch==="main"&&w.steps[0]?.attempts===2&&w.workflow?.state==="SUCCEEDED");
  result.status=Object.values(result.checks).every(Boolean)?"OBSERVED":"FAIL";return result;
 }

@@ -318,3 +318,22 @@ test("fixed qualification DAG resolves branch SHA, checks exact Actions runs, ve
     assert.equal((await executionFinalize(f.db,owner,{project,workflow_id:w.workflow_id})).verified,false);
   }finally{f.close()}
 });
+
+test("missing step cannot be promoted or independently verified",async()=>{
+ const f=dbFixture();try{
+  await seedProject(f.db);const project="williams";
+  const args={project,name:"definition integrity",idempotency_key:"definition-integrity-1",steps:["z","a"].map(key=>({key,operation:"sha256_verify",input:{text:"abc",expected_sha256:"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}}))};
+  const w=await workflowCreate(f.db,owner,args),ref={project,workflow_id:w.workflow_id};
+  await workflowStart(f.db,owner,ref);await runWorkflowBatch(f.db,owner,1);
+  f.raw.prepare("DELETE FROM eg_workflow_steps WHERE workflow_id=? AND state='QUEUED'").run(w.workflow_id);
+  assert.equal((await runWorkflowBatch(f.db,owner,1)).executed,0);
+  const status=await workflowStatus(f.db,owner,ref);
+  assert.equal(status.workflow.state,"FAILED");assert.equal(status.workflow.error_code,"workflow_definition_corrupt");
+  assert.equal((await executionFinalize(f.db,owner,ref)).verified,false);
+  const w2=await workflowCreate(f.db,owner,{...args,idempotency_key:"definition-integrity-2"}),ref2={project,workflow_id:w2.workflow_id};
+  await workflowStart(f.db,owner,ref2);await runWorkflowBatch(f.db,owner,2);
+  assert.equal((await executionFinalize(f.db,owner,ref2)).verified,true);
+  f.raw.prepare("DELETE FROM eg_workflow_steps WHERE workflow_id=? AND step_key='z'").run(w2.workflow_id);
+  assert.equal((await executionFinalize(f.db,owner,ref2)).verified,false);
+ }finally{f.close()}
+});

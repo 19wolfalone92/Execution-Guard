@@ -105,6 +105,8 @@ try{
  check("production_browser_route_denied",(await req("https://execution-guard.19wolf-alone92.workers.dev","/qualification/oauth")).status===404);
  out.memory_after=await snapshot();check("prior_live_memory_preserved",JSON.stringify(out.memory_before)===JSON.stringify(out.memory_after));
  check("prior_dag_seven_steps",out.memory_after.steps.count===7);
+ const prior=await get(host,"/qualification/tick?diagnostic=prior-proof",{method:"POST",headers:{Authorization:"Bearer "+tick}});
+ out.prior_live_proof=prior.body;check("prior_real_dag_reverified",prior.http===200&&prior.body?.current_sha===sha&&prior.body?.verified===true&&prior.body?.verified_steps===7);
  const recovery=await remoteRecovery(host,tick);console.log("REMOTE_RECOVERY "+JSON.stringify(recovery));out.recovery={passed:recovery.passed,total:recovery.total};check("remote_recovery",recovery.passed===recovery.total);
  const denied=await req(host,"/qualification/tick?diagnostic=recovery",{method:"POST"});check("recovery_requires_secret",denied.status===403);
  const prodDenied=await req("https://execution-guard.19wolf-alone92.workers.dev","/qualification/tick?diagnostic=recovery",{method:"POST"});check("production_recovery_denied",prodDenied.status===404);
