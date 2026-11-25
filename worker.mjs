@@ -24,6 +24,7 @@ async function status(env) {
     status: "online",
     database,
     persistence_probe,
+    oauth_storage: typeof env?.OAUTH_KV?.get === "function" ? "bound" : "not_bound",
     timestamp: new Date().toISOString()
   };
 }
