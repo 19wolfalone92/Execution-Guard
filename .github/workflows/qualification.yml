@@ -15,8 +15,8 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
-      - name: Install pinned dependencies and generate lockfile during qualification
-        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Install exact dependency graph from committed lockfile
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Report dependency audit details
         run: |
           npm audit --json > npm-audit.json || true
