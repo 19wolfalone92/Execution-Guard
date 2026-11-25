@@ -65,6 +65,7 @@ const tools = [
 ];
 function json(value, status=200) { return Response.json(value,{status,headers:{"Cache-Control":"no-store"}}); }
 function validArgs(args,keys) {return args && typeof args==="object" && !Array.isArray(args) && Object.keys(args).length===keys.length && keys.every(k=>Object.hasOwn(args,k));}
+function containsSecret(value) {return typeof value==="string" && /(?:gh[pousr]_[A-Za-z0-9_]{20,}|Bearer\s+[A-Za-z0-9._~-]{20,}|-----BEGIN (?:RSA|OPENSSH|EC) PRIVATE KEY-----|AKIA[0-9A-Z]{16})/.test(value);}
 function writeChallenge(description) {
   return {"mcp/www_authenticate":[
     "Bearer resource_metadata=\""+HOST+"/.well-known/oauth-protected-resource/mcp-private\", error=\"insufficient_scope\", error_description=\""+description+"\", scope=\""+READ+" "+WRITE+"\""
@@ -88,7 +89,7 @@ const handlers = {
   task_evidence_get:(db,owner,args)=>taskEvidenceGet(db,owner,args),
   execution_audit:(db,owner,args)=>executionAudit(db,owner,args),
   execution_finalize:(db,owner,args)=>executionFinalize(db,owner,args),
-  system_health:(db,owner)=>systemHealth(db,owner)
+  system_health:(db,owner,args)=>systemHealth(db,owner,args)
 };
 export async function privateFetch(request,env,ctx) {
   if (!isOwner(env,ctx)) return json({error:"forbidden"},403);
@@ -126,7 +127,7 @@ export async function privateFetch(request,env,ctx) {
     const write=name==="checkpoint_put";
     if(write&&!ctx.auth.scope.includes(WRITE))return reply({isError:true,content:[{type:"text",text:"Write scope required"}],_meta:writeChallenge("Checkpoint write scope required")});
     if(!validArgs(args,write?["project","expected_revision","value"]:["project"])||typeof args.project!=="string"||!projectPattern.test(args.project))return rpcError(-32602,"Invalid arguments");
-    if(write&&(!Number.isInteger(args.expected_revision)||args.expected_revision<0||args.expected_revision>2147483646||typeof args.value!=="string"||new TextEncoder().encode(args.value).length>8192))return rpcError(-32602,"Invalid revision or value");
+    if(write&&(!Number.isInteger(args.expected_revision)||args.expected_revision<0||args.expected_revision>2147483646||typeof args.value!=="string"||new TextEncoder().encode(args.value).length>8192||containsSecret(args.value)))return rpcError(-32602,"Invalid revision or value");
     try {
       if(!write){
         const table=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='eg_checkpoints'").first();
