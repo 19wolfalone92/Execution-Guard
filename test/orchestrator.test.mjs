@@ -61,7 +61,7 @@ test("workflow DAG executes independent steps, respects dependencies and stores 
   try{
     seedProbe(f.raw);
     await seedProject(f.db);
-    const workflow=await workflowCreate(f.db,owner,{project:"williams",name:"qualification",steps:[
+    const workflow=await workflowCreate(f.db,owner,{project:"williams",name:"qualification",idempotency_key:"qualification-idem",steps:[
       {key:"hash",operation:"sha256_verify",input:{text:"abc",expected_sha256:"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}},
       {key:"health",operation:"health_probe",input:{},depends_on:["hash"]}
     ]});
@@ -86,14 +86,14 @@ test("workflow validation rejects cycles, unknown operations and cross-project a
   const f=dbFixture();
   try{
     await seedProject(f.db);
-    const cyclic=await workflowCreate(f.db,owner,{project:"williams",name:"cycle",steps:[
+    const cyclic=await workflowCreate(f.db,owner,{project:"williams",name:"cycle",idempotency_key:"cycle-idem",steps:[
       {key:"a",operation:"health_probe",input:{},depends_on:["b"]},
       {key:"b",operation:"health_probe",input:{},depends_on:["a"]}
     ]});
     assert.equal(cyclic.error,"invalid_workflow_definition");
-    const unsupported=await workflowCreate(f.db,owner,{project:"williams",name:"unsafe",steps:[{key:"shell",operation:"shell",input:{command:"id"}}]});
+    const unsupported=await workflowCreate(f.db,owner,{project:"williams",name:"unsafe",idempotency_key:"unsafe-idem",steps:[{key:"shell",operation:"shell",input:{command:"id"}}]});
     assert.equal(unsupported.error,"invalid_workflow_definition");
-    const other=await workflowCreate(f.db,owner,{project:"missing",name:"missing",steps:[{key:"a",operation:"health_probe",input:{}}]});
+    const other=await workflowCreate(f.db,owner,{project:"missing",name:"missing",idempotency_key:"missing-idem",steps:[{key:"a",operation:"health_probe",input:{}}]});
     assert.equal(other.error,"project_not_found");
   }finally{f.close()}
 });
@@ -102,7 +102,7 @@ test("pause, resume and cancellation enforce workflow state transitions",async()
   const f=dbFixture();
   try{
     await seedProject(f.db);
-    const workflow=await workflowCreate(f.db,owner,{project:"williams",name:"lifecycle",steps:[{key:"health",operation:"health_probe",input:{}}]});
+    const workflow=await workflowCreate(f.db,owner,{project:"williams",name:"lifecycle",idempotency_key:"lifecycle-idem",steps:[{key:"health",operation:"health_probe",input:{}}]});
     await workflowStart(f.db,owner,{project:"williams",workflow_id:workflow.workflow_id});
     assert.equal((await workflowPause(f.db,owner,{project:"williams",workflow_id:workflow.workflow_id})).status,"paused");
     assert.equal((await workflowStatus(f.db,owner,{project:"williams",workflow_id:workflow.workflow_id})).workflow.state,"PAUSED");
@@ -117,7 +117,7 @@ test("failed verification is not success and retry exhaustion requires explicit 
   const f=dbFixture();
   try{
     await seedProject(f.db);
-    const workflow=await workflowCreate(f.db,owner,{project:"williams",name:"bad-hash",steps:[{key:"hash",operation:"sha256_verify",input:{text:"abc",expected_sha256:"0".repeat(64)},max_attempts:1}]});
+    const workflow=await workflowCreate(f.db,owner,{project:"williams",name:"bad-hash",idempotency_key:"bad-hash-idem",steps:[{key:"hash",operation:"sha256_verify",input:{text:"abc",expected_sha256:"0".repeat(64)},max_attempts:1}]});
     await workflowStart(f.db,owner,{project:"williams",workflow_id:workflow.workflow_id});
     await runWorkflowBatch(f.db,owner,1,fetch,Date.now());
     assert.equal((await workflowStatus(f.db,owner,{project:"williams",workflow_id:workflow.workflow_id})).workflow.state,"FAILED");
