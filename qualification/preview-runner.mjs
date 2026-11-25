@@ -18,7 +18,7 @@ try{
  const match=reports.find(({p})=>p.sha===v.sha&&p.owner_verified===true&&p.refresh===true);
  if(!match){out.status="BLOCKED";out.reason="owner_authorization_not_observed";process.exitCode=1;}
  else{
-  let {row,p}=match;out.project=p.project;out.proof_project=row.project;out.revision=row.revision;out.oauth={owner_verified:p.owner_verified,refresh:p.refresh,pkce:p.pkce,state:p.state===undefined?false:true,rotation:p.refresh_rotation_observed,read_only:p.read_only};
+  let {row,p}=match;out.project=p.project;out.proof_project=row.project;out.revision=row.revision;out.oauth={owner_verified:p.owner_verified,refresh:p.refresh,pkce:p.pkce,state_validated:p.state_validated===true,rotation:p.refresh_rotation_observed,read_only:p.read_only};
   if(v.sha!==sha){out.status="BLOCKED";out.reason="workflow_sha_not_live";process.exitCode=1;}
   else if(!/^[a-f0-9-]{36}$/.test(p.workflow_id||"")||! /^[a-f0-9-]{36}$/.test(p.control_id||"")){out.status="BLOCKED";out.reason="authorized_but_workflow_not_created";process.exitCode=1;}
   else{

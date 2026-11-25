@@ -155,6 +155,7 @@ try{
   const noSession=await json(await tickRequest(tokens.access_token));ok(!!noSession.error,"owner qualification tick rejects missing session or production");
   if(preview){
     const project="eg-qualification-browser-00000000-0000-4000-8000-000000000001",proof_project=project+"-p";
+    ok(value(await tool(tokens.access_token,"project_create",{project,record:{goal:"Owner tick fixture"}})).status==="created","owner tick project created");
     const w=value(await tool(tokens.access_token,"workflow_create",{project,name:"owner tick test",idempotency_key:"owner-tick-test",steps:[{key:"health",operation:"health_probe",input:{}}]}));
     ok(w.status==="created","owner tick fixture created");const ref={project,workflow_id:w.workflow_id};
     ok(value(await tool(tokens.access_token,"workflow_start",ref)).status==="started","owner tick fixture queued");
