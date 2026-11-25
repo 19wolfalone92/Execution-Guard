@@ -11,6 +11,7 @@ const defaultHandler={async fetch(request,env) {
   try {
     if(path==="/authorize"){
       if(request.method==="GET"){
+        if(new URL(request.url).searchParams.get("client_id")!==CLIENT)return new Response("Client forbidden",{status:403});
         const parsed=await oauth.parseAuthRequest(request);
         if(parsed.clientId!==CLIENT)return new Response("Only the approved ChatGPT client is allowed",{status:403});
         const details=await oauth.describeConsent(parsed);
