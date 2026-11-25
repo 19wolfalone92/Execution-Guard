@@ -111,6 +111,14 @@ try{
   const bad=await exchange(code,"B".repeat(64));ok(bad.status>=400,"incorrect PKCE verifier rejected");
   const tokenResponse=await exchange(code);assert.equal(tokenResponse.status,200,await tokenResponse.clone().text());const tokens=await json(tokenResponse);
   ok(typeof tokens.access_token==="string"&&typeof tokens.refresh_token==="string"&&tokens.token_type.toLowerCase()==="bearer","authorization code exchanged for MCP tokens");
+  const refreshResponse=await tokenRequest({grant_type:"refresh_token",client_id:clientId,refresh_token:tokens.refresh_token,resource});
+  assert.equal(refreshResponse.status,200,await refreshResponse.clone().text());
+  const refreshedTokens=await json(refreshResponse);
+  ok(typeof refreshedTokens.access_token==="string"&&refreshedTokens.token_type.toLowerCase()==="bearer","refresh token grant issues a new MCP access token");
+  const invalidRefresh=await tokenRequest({grant_type:"refresh_token",client_id:clientId,refresh_token:"invalid-refresh-token",resource});
+  ok(invalidRefresh.status>=400,"invalid refresh token rejected");
+  const refreshedWho=value(await tool(refreshedTokens.access_token,"whoami"));
+  ok(refreshedWho.authenticated&&refreshedWho.owner_verified,"refreshed access token is accepted by protected MCP");
   const init=await rpc(tokens.access_token,"initialize",{protocolVersion:"2025-11-25",capabilities:{},clientInfo:{name:"qualification",version:"1"}});
   ok(init.serverInfo.name==="execution-guard-private"&&init.protocolVersion==="2025-11-25","MCP initialize");
   const notification=await call("/mcp-private",{method:"POST",headers:{Authorization:"Bearer "+tokens.access_token,"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})});ok(notification.status===202,"MCP initialized notification");
