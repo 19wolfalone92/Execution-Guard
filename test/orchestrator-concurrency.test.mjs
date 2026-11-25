@@ -14,7 +14,7 @@ test("D1 lease claim enforces the four-running-steps per-owner limit",async()=>{
   try{
     await projectCreate(f.db,"owner",{project:"cap",record:{goal:"Concurrency qualification"}});
     const steps=Array.from({length:5},(_,i)=>({key:"step"+i,operation:"health_probe",input:{}}));
-    const wf=await workflowCreate(f.db,"owner",{project:"cap",name:"owner-cap",steps});
+    const wf=await workflowCreate(f.db,"owner",{project:"cap",name:"owner-cap",idempotency_key:"owner-cap-idem",steps});
     await workflowStart(f.db,"owner",{project:"cap",workflow_id:wf.workflow_id});
     f.raw.prepare("UPDATE eg_workflow_steps SET state='RUNNING',attempts=1,lease_id='held',lease_until=? WHERE workflow_id=? AND step_key IN ('step0','step1','step2','step3')").run(Date.now()+60000,wf.workflow_id);
     const result=await runWorkflowBatch(f.db,"owner",4,fetch,Date.now());
