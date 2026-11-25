@@ -23,6 +23,7 @@ jobs:
         run: |
           npm audit --json > npm-audit.json || true
           node --input-type=module -e 'import fs from "node:fs"; const a=JSON.parse(fs.readFileSync("npm-audit.json","utf8")); const v=a.vulnerabilities||{}; console.log(JSON.stringify({counts:a.metadata?.vulnerabilities||{},findings:Object.entries(v).map(([name,x])=>({name,severity:x.severity,isDirect:x.isDirect,range:x.range,via:x.via,fixAvailable:x.fixAvailable}))},null,2));'
+          npm audit --audit-level=high
       - name: Bundle exactly as a Workers deployment (no deploy)
         run: npx wrangler deploy --dry-run --outdir .oauth-build
       - name: Exercise OAuth and protected MCP flow using workerd
