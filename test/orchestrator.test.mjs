@@ -139,3 +139,20 @@ test("GitHub read adapter is host-pinned, read-only and classifies rate limits",
   assert.equal(limited.retryable,true);
   assert.equal(limited.error,"github_rate_limited");
 });
+
+
+test("workflow creation is idempotent and rejects key reuse with a different definition",async()=>{
+  const f=dbFixture();
+  try{
+    await seedProject(f.db);
+    const definition={project:"williams",name:"idempotent",idempotency_key:"workflow-idem-1",steps:[{key:"health",operation:"health_probe",input:{}}]};
+    const first=await workflowCreate(f.db,owner,definition);
+    const repeated=await workflowCreate(f.db,owner,definition);
+    assert.equal(first.status,"created");
+    assert.equal(repeated.status,"existing");
+    assert.equal(repeated.deduplicated,true);
+    assert.equal(repeated.workflow_id,first.workflow_id);
+    const conflict=await workflowCreate(f.db,owner,{...definition,name:"different-definition"});
+    assert.equal(conflict.error,"idempotency_conflict");
+  }finally{f.close()}
+});
