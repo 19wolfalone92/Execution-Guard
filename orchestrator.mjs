@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 const projectPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const workflowIdPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const stepKeyPattern = /^[a-z0-9][a-z0-9_-]{0,31}$/;
-const repoPartPattern = /^(?!\\.{1,2}$)[A-Za-z0-9_.-]{1,100}$/;
+const repoPartPattern = /^(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}$/;
 const shaPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const secretKeyPattern = /(?:token|secret|password|credential|private.?key|authorization|cookie)/i;
 const projectFields = new Set(["goal","rules","repository","branch","commit","pull_request","stage","completed","pending","errors","tests","limitations","next_action","evidence"]);
@@ -30,7 +30,7 @@ async function ensureSchema(db) {
 function scanForSecrets(value, depth = 0) {
   if (depth > 8) return false;
   if (Array.isArray(value)) return value.every(item => scanForSecrets(item,depth+1));
-  if (typeof value === "string") return !/(?:gh[pousr]_[A-Za-z0-9_]{20,}|Bearer\\s+[A-Za-z0-9._~-]{20,}|sk-[A-Za-z0-9]{20,})/.test(value);
+  if (typeof value === "string") return !/(?:gh[pousr]_[A-Za-z0-9_]{20,}|Bearer\s+[A-Za-z0-9._~-]{20,}|sk-[A-Za-z0-9]{20,})/.test(value);
   if (!isObject(value)) return true;
   for (const [key,item] of Object.entries(value)) {
     if (secretKeyPattern.test(key) || !scanForSecrets(item,depth+1)) return false;
