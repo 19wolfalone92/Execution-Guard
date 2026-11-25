@@ -15,7 +15,9 @@ const mock=createFetchMock();
 mock.disableNetConnect();
 const mf=new Miniflare({
   modules:true,scriptPath:".oauth-build/"+script[0],
-  compatibilityDate:config.compatibility_date,
+  // Installed workerd 4.x test binary supports dates through 2026-08-06.
+  // This is a test-only cap; production Wrangler configuration is unchanged.
+  compatibilityDate:config.compatibility_date>"2026-08-06"?"2026-08-06":config.compatibility_date,
   compatibilityFlags:config.compatibility_flags,
   bindings:{EG_AUTH_ENABLED:"true",EG_OWNER_GITHUB_ID:owner,GITHUB_CLIENT_ID:"qualification-client",GITHUB_CLIENT_SECRET:"qualification-secret"},
   kvNamespaces:["OAUTH_KV"],d1Databases:["DB"],fetchMock:mock,cf:false
