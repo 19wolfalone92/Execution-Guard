@@ -1,24 +1,38 @@
-# Execution Guard 0.3.1
+# Execution Guard Pro — deployment and qualification
 
-Read-only MCP and D1 probe baseline. No credentials, job execution or database write tools are included. The database UUID in Wrangler is a resource identifier, not an access token. Keep credentials in Cloudflare Secrets, never in Git.
+## Production baseline
 
-Cloudflare Workers Builds for existing Worker:
-- Production branch: main
-- Build command: npm test
-- Deploy command: npx wrangler deploy
-- Preview builds: disabled
-- Enable builds only after checking configuration and code.
+The existing Cloudflare Worker is configured in `wrangler.jsonc` with:
+- D1 binding `DB` and the existing production database.
+- KV binding `OAUTH_KV`.
+- `nodejs_compat` and `global_fetch_strictly_public`.
+- A five-minute Cron Trigger.
+- Cloudflare Worker Builds configured to deploy from `main`.
 
-The existing production probe is not modified by deployment. probe.sql is for initialization only. Tests use temporary SQLite with a D1-shaped adapter, not production D1. After deployment verify version 0.3.1, database online and persistence_probe verified via MCP.
+The production baseline remains 0.5.0 until a reviewed merge and deployment. Do not run `wrangler d1 migrations apply`, reset D1, replace the database ID, or recreate the OAuth KV namespace as part of this release.
 
-## Post-connection qualification
+## 0.6.0 candidate
 
-A push to main after enabling Workers Builds triggers deployment. Inspect Deployments > View Build History for the matching commit and verify both npm test and Wrangler deployment succeeded. The live MCP response must report version 0.3.1 with database online and persistence_probe verified. If a build fails, inspect its logs before retrying. Do not reinitialize production D1 or expose credentials.
+The candidate is developed on `audit/oauth-e2e-20261125` and PR #5. CI uses Wrangler dry-run only; it does not deploy. Do not merge while PR checks are red, the dependency lockfile is missing, the npm audit gate reports high/critical findings, or live OAuth qualification is incomplete.
 
-## 0.4.0 — staged OAuth and checkpoints
+## Required release sequence
 
-The public /mcp remains read-only. The separate /mcp-private route is fail-closed until all configuration is present. The Cloudflare OAuth provider is pinned; use CIMD with the approved ChatGPT client. GitHub identity only (read:user), no repository token stored. Owner must create a GitHub OAuth App with homepage https://execution-guard.19wolf-alone92.workers.dev and callback /callback on that host, create KV namespace, and add its ID to Wrangler under kv_namespaces with binding OAUTH_KV. Set GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET and EG_OWNER_GITHUB_ID in Worker Secrets; enable EG_AUTH_ENABLED=true only after config and tests. Do not put credentials in Git. Then create a second MCP plugin for /mcp-private with OAuth, CIMD and scopes eg:read and eg:write. Private tools do not run commands or access other repositories. Test unauthenticated rejection, owner sign-in, read/write scope enforcement, checkpoint read-back, and stale revision rejection. Disable EG_AUTH_ENABLED for emergency access revocation. Existing public health is independent.
+1. Review the final PR diff and all review threads.
+2. Confirm the committed lockfile matches the pinned package manifest; use `npm ci` in CI.
+3. Require all unit, integration, security, OAuth/workerd and Wrangler dry-run checks to pass.
+4. Perform a real owner OAuth sign-in and refresh against the production host. CI simulations are not a substitute.
+5. Merge only after explicit release approval.
+6. Confirm Cloudflare Worker Builds deployed the exact main commit. If the deployment is not automatically triggered, use the authorized Cloudflare dashboard path; do not invent or substitute a deployment credential.
+7. Verify public health reports version 0.6.0, database online and persistence probe verified.
+8. Verify OAuth authorization-server metadata and registered client details.
+9. Verify the private MCP endpoint rejects unauthenticated callers and accepts only the authenticated owner with the correct scope.
+10. Submit a small multi-step workflow through protected MCP. Wait for the Cron Trigger, read each step, verify evidence and call `execution_finalize`.
+11. Confirm the pre-existing legacy checkpoint and diagnostic task records remain readable.
 
-## 0.5.0 — durable diagnostic task queue
+## Recovery
 
-Cron runs every five minutes, no work when private authorization is disabled. The authenticated owner may submit health_probe or sha256_verify only; no shell, repository, GPU or device operations are accepted. Owner/project isolation, idempotency, a queue cap, atomic claim with leases, stale lease recovery, bounded retries and persisted evidence are included. Terminal records are retained; storage cap is 5000 tasks. Verify in live D1 only after private OAuth activation: submit a health_probe and check task_status after a scheduled invocation; submit sha256_verify with text abc and expected ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad. A mismatch must fail. The worker does not call AI models or automatically repair arbitrary code.
+If any post-deploy check fails, stop release qualification. Use the configured Cloudflare deployment history to roll back to the last verified Worker version. Do not reinitialize D1, rotate OAuth secrets without a reason, or disable owner verification as a workaround.
+
+## Runtime boundaries
+
+The 0.6.0 candidate uses D1 and the existing Cron Trigger for short bounded steps. It does not provision Cloudflare Queues, Durable Objects or Cloudflare Workflows, and it does not support arbitrary code/shell execution or long-running AI jobs. GitHub access is public read-only in this stage; private repositories and GitHub writes require a separately approved GitHub App integration.
