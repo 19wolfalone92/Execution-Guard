@@ -314,5 +314,7 @@ test("fixed qualification DAG resolves branch SHA, checks exact Actions runs, ve
     assert.equal((await executionFinalize(f.db,owner,{project,workflow_id:w.workflow_id})).verified,true);
     await runWorkflowBatch(f.db,owner,8,fetcher,Date.now());
     assert.equal(f.raw.prepare("SELECT COUNT(*) AS n FROM eg_checkpoints").get().n,1);
+    f.raw.prepare("UPDATE eg_checkpoints SET value='tampered' WHERE project=?").run(saved.checkpoint);
+    assert.equal((await executionFinalize(f.db,owner,{project,workflow_id:w.workflow_id})).verified,false);
   }finally{f.close()}
 });

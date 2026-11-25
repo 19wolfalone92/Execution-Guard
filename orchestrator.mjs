@@ -571,10 +571,23 @@ export async function runWorkflowBatch(db, owner, limit=4, fetcher=fetch, now=Da
 export async function executionFinalize(db, owner, args) {
   const status=await workflowStatus(db,owner,args);
   if(!status.found)return status;
-  const verified=status.workflow.state==="SUCCEEDED"&&status.steps.length>0&&status.steps.every(step=>{
+  let verified=status.workflow.state==="SUCCEEDED"&&status.steps.length>0&&status.steps.every(step=>{
     if(step.state!=="SUCCEEDED"||step.evidence?.verified!==true||!step.result)return false;
     const digest=createHash("sha256").update(JSON.stringify(step.result),"utf8").digest("hex");
     return digest===step.evidence.result_sha256;
   });
+  if(verified&&status.steps.some(s=>s.operation==="qualification_checkpoint")){
+    try{
+      const rows=await loadSteps(db,owner,args.project,args.workflow_id);
+      const expected=qualificationSnapshot(rows,args.workflow_id);
+      const collected=checkedResult(rows.find(r=>r.operation==="qualification_collect"));
+      const independentlyVerified=checkedResult(rows.find(r=>r.operation==="qualification_verify"));
+      const checkpoint=checkedResult(rows.find(r=>r.operation==="qualification_checkpoint"));
+      const sha256=digestOf(JSON.stringify(expected));
+      const key="eg-qualification-"+args.workflow_id;
+      const saved=await db.prepare("SELECT revision,value FROM eg_checkpoints WHERE owner=? AND project=?").bind(owner,key).first();
+      verified=collected.sha256===sha256&&JSON.stringify(collected.snapshot)===JSON.stringify(expected)&&independentlyVerified.sha256===sha256&&checkpoint.checkpoint===key&&checkpoint.sha256===sha256&&saved?.revision===1&&saved.value===JSON.stringify({snapshot:expected,sha256});
+    }catch{verified=false;}
+  }
   return {workflow_id:args.workflow_id,state:status.workflow.state,verified,steps:status.steps.length,verified_steps:status.steps.filter(step=>step.evidence?.verified===true).length};
 }

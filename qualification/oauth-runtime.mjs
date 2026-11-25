@@ -199,6 +199,22 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
   }
   console.log("WORKFLOW DIAGNOSTIC "+JSON.stringify(workflowState));
   ok(workflowState.workflow.state==="SUCCEEDED"&&workflowState.steps.every(x=>x.state==="SUCCEEDED"),"DAG dependencies executed by actual scheduled Worker");
+  const wfRef={project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id};
+  const deps=value(await tool(tokens.access_token,"workflow_dependencies_get",wfRef));
+  ok(deps.dependencies.some(x=>x.key==="hash"&&x.depends_on.includes("health")),"workflow dependency graph read through MCP");
+  const cancellable=value(await tool(tokens.access_token,"task_submit",{project:"qualification",idempotency_key:"qualification-cancel",kind:"health_probe",payload:{}}));
+  ok(value(await tool(tokens.access_token,"task_cancel",{project:"qualification",task_id:cancellable.task_id})).state==="cancelled","queued diagnostic task cancelled through MCP");
+  const temporary=value(await tool(tokens.access_token,"workflow_create",{project:"workflow-qualification",name:"control qualification",idempotency_key:"control-qualification",steps:[{key:"bad",operation:"sha256_verify",input:{text:"not matching",expected_sha256:"0".repeat(64)}}]}));
+  const tempRef={project:"workflow-qualification",workflow_id:temporary.workflow_id};
+  ok(value(await tool(tokens.access_token,"workflow_start",tempRef)).status==="started","control workflow started");
+  ok(value(await tool(tokens.access_token,"workflow_pause",tempRef)).status==="paused","workflow pause through MCP");
+  ok(value(await tool(tokens.access_token,"workflow_resume",tempRef)).status==="resumed","workflow resume through MCP");
+  await tick();
+  for(let i=0;i<20;i++){if(value(await tool(tokens.access_token,"workflow_status",tempRef)).workflow.state==="FAILED")break;await new Promise(r=>setTimeout(r,100));}
+  ok(value(await tool(tokens.access_token,"workflow_status",tempRef)).workflow.state==="FAILED","incorrect digest fails workflow");
+  ok(value(await tool(tokens.access_token,"workflow_retry",tempRef)).status==="retrying","workflow retry through MCP");
+  ok(value(await tool(tokens.access_token,"workflow_cancel",tempRef)).status==="cancelled","workflow cancel through MCP");
+  ok(value(await tool(tokens.access_token,"workflow_status",tempRef)).workflow.state==="CANCELLED","cancelled workflow remains terminal");
   const evidence=value(await tool(tokens.access_token,"task_evidence_get",{project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id,step_key:"hash"}));
   ok(evidence.evidence.verified===true&&typeof evidence.evidence.result_sha256==="string","workflow step evidence stored");
   const finalized=value(await tool(tokens.access_token,"execution_finalize",{project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id}));
@@ -230,6 +246,18 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
   const blocked=await tool(readTokens.access_token,"checkpoint_put",{project:"qualification",expected_revision:1,value:"forbidden"});
   ok(blocked.isError===true,"read-only scope cannot write");
   const unchanged=value(await tool(readTokens.access_token,"checkpoint_get",{project:"qualification"}));ok(unchanged.value==="proof"&&unchanged.revision===1,"scope denial leaves data unchanged");
+  const allTools=(await rpc(readTokens.access_token,"tools/list")).tools;
+  ok(allTools.length===25&&new Set(allTools.map(t=>t.name)).size===25,"exactly 25 unique MCP tools");
+  for(const t of allTools){
+    ok(t.inputSchema.type==="object"&&t.inputSchema.additionalProperties===false&&Array.isArray(t.inputSchema.required)&&t.securitySchemes?.[0]?.scopes?.includes("eg:read"),"tool schema and read scope: "+t.name);
+    const raw=await call("/mcp-private",{method:"POST",headers:{Authorization:"Bearer "+readTokens.access_token,"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1000,method:"tools/call",params:{name:t.name,arguments:{unexpected:true}}})});
+    const b=await json(raw);
+    ok(!!b.error||b.result?.isError===true,"invalid arguments or missing write scope rejected: "+t.name);
+    if(t.securitySchemes[0].scopes.includes("eg:write"))ok(b.result?.isError===true,"read-only caller cannot invoke write tool: "+t.name);
+    const noAuth=await call("/mcp-private",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1001,method:"tools/call",params:{name:t.name,arguments:{}}})});
+    ok(noAuth.status===401,"unauthenticated tool call rejected: "+t.name);
+  }
+
   if(baselinePath){
     await switchWorker(baselinePath);
     const rolled=await rpc(readTokens.access_token,"initialize",{protocolVersion:"2025-11-25",capabilities:{},clientInfo:{name:"rollback",version:"1"}});
