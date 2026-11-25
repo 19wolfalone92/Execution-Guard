@@ -65,6 +65,24 @@ async function exchangeGithubCode(env,code,verifier,fetcher=fetch) {
   if(typeof payload?.access_token!=="string"||!payload.access_token||typeof payload.token_type!=="string"||payload.token_type.toLowerCase()!=="bearer")return {error:"invalid_token_response"};
   return {accessToken:payload.access_token};
 }
+// Fetch only GitHub's fixed identity endpoint. Never forward a bearer token on redirect.
+async function lookupGithubOwner(accessToken,ownerId,fetcher=fetch) {
+  if(typeof accessToken!=="string"||!accessToken||/[\r\n]/.test(accessToken))return {error:"invalid_token"};
+  if(typeof ownerId!=="string"||!/^\d+$/.test(ownerId))return {error:"invalid_owner_configuration"};
+  let response;
+  try {
+    response=await fetcher("https://api.github.com/user",{method:"GET",redirect:"manual",headers:{Authorization:"Bearer "+accessToken,"User-Agent":"Execution-Guard",Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"},signal:AbortSignal.timeout(15000)});
+  } catch(error) {
+    return {error:error?.name==="TimeoutError"||error?.name==="AbortError"?"network_timeout":"network_failure"};
+  }
+  if(response.status>=300&&response.status<400)return {error:"unexpected_redirect"};
+  if(!response.ok)return {error:"http_"+response.status};
+  let user;
+  try {user=await response.json();} catch {return {error:"invalid_json"};}
+  if(!user||!Number.isSafeInteger(user.id)||user.id<=0)return {error:"invalid_identity_response"};
+  if(String(user.id)!==ownerId)return {error:"owner_required"};
+  return {userId:String(user.id)};
+}
 const defaultHandler={async fetch(request,env) {
   const path=new URL(request.url).pathname;
   const oauth=env.OAUTH_PROVIDER;
@@ -121,12 +139,14 @@ const defaultHandler={async fetch(request,env) {
       }
       const access_token=exchange.accessToken;
       stage="github_user_lookup";
-      const response=await fetch("https://api.github.com/user",{redirect:"error",headers:{Authorization:"Bearer "+access_token,"User-Agent":"Execution-Guard",Accept:"application/vnd.github+json"}});
-      if(!response.ok)return new Response("Authorization failed (github_user_lookup / http_"+response.status+")",{status:403,headers});
-      const user=await response.json();
-      if(String(user.id)!==env.EG_OWNER_GITHUB_ID)return new Response("Owner required",{status:403,headers});
+      const identity=await lookupGithubOwner(access_token,env.EG_OWNER_GITHUB_ID);
+      if(identity.error){
+        console.warn(JSON.stringify({event:"oauth_authorization_failed",stage,category:identity.error}));
+        headers.set("Content-Type","text/plain; charset=utf-8");
+        return new Response("Authorization failed ("+stage+" / "+identity.error+")",{status:identity.error==="owner_required"?403:502,headers});
+      }
       stage="complete_authorization";
-      const {redirectTo}=await oauth.completeAuthorization({request:original,userId:String(user.id),metadata:{},scope:original.scope,props:{userId:String(user.id)}});
+      const {redirectTo}=await oauth.completeAuthorization({request:original,userId:identity.userId,metadata:{},scope:original.scope,props:{userId:identity.userId}});
       headers.set("Location",redirectTo);
       return new Response(null,{status:302,headers});
     }
