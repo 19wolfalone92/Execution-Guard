@@ -157,6 +157,7 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
     await new Promise(resolve=>setTimeout(resolve,100));
     await worker.scheduled({cron:"*/5 * * * *"});
   }
+  console.log("WORKFLOW DIAGNOSTIC "+JSON.stringify(workflowState));
   ok(workflowState.workflow.state==="SUCCEEDED"&&workflowState.steps.every(x=>x.state==="SUCCEEDED"),"DAG dependencies executed by actual scheduled Worker");
   const evidence=value(await tool(tokens.access_token,"task_evidence_get",{project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id,step_key:"hash"}));
   ok(evidence.evidence.verified===true&&typeof evidence.evidence.result_sha256==="string","workflow step evidence stored");
