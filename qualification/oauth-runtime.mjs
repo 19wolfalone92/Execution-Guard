@@ -184,14 +184,13 @@ ok(final.state==="succeeded"&&final.result.verified===true,"scheduled task compl
   ok(graph.dependencies.find(x=>x.key==="health").dependents.includes("hash"),"workflow dependency graph readback");
   const startedWorkflow=value(await tool(tokens.access_token,"workflow_start",{project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id}));
   ok(startedWorkflow.status==="started","workflow start transition");
-  const worker=await mf.getWorker();
-  await worker.scheduled({cron:"*/5 * * * *"});
+  await tick();
   let workflowState;
   for(let i=0;i<50;i++){
     workflowState=value(await tool(tokens.access_token,"workflow_status",{project:"workflow-qualification",workflow_id:createdWorkflow.workflow_id}));
     if(workflowState.workflow?.state==="SUCCEEDED")break;
     await new Promise(resolve=>setTimeout(resolve,100));
-    await worker.scheduled({cron:"*/5 * * * *"});
+    await tick();
   }
   console.log("WORKFLOW DIAGNOSTIC "+JSON.stringify(workflowState));
   ok(workflowState.workflow.state==="SUCCEEDED"&&workflowState.steps.every(x=>x.state==="SUCCEEDED"),"DAG dependencies executed by actual scheduled Worker");
