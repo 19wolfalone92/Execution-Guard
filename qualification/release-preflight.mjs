@@ -12,6 +12,8 @@ const get=async(base,path,options={})=>{const r=await req(base,path,options);ret
 const api=async(n,path,token=read,method="GET",body)=>{try{const x=await get("https://api.cloudflare.com/client/v4",path,{method,headers:{Authorization:"Bearer "+token,...(body?{"Content-Type":"application/json"}:{})},...(body?{body:JSON.stringify(body)}:{})});out.api[n]={http:x.http,ok:x.body?.success===true,error_codes:(x.body?.errors||[]).map(e=>e.code).filter(Number.isInteger)};return x.body?.success===true?x.body.result:null;}catch{out.api[n]={ok:false};return null;}};
 const prefix="/accounts/"+account;
 try{
+ assert.equal(process.env.GITHUB_REPOSITORY,"19wolfalone92/Execution-Guard");
+ assert.match(out.sha||"",/^[a-f0-9]{40}$/);
  assert.equal(account,"04b45c9393f4e12159c6b8118ec54791");assert.equal(process.env.GITHUB_REF,"refs/heads/audit/oauth-e2e-20261125");assert.ok(read&&manage&&tick?.length>=32);
  const before=await api("production_deployments",prefix+"/workers/scripts/execution-guard/deployments");
  out.production=(before?.deployments||[]).slice(0,1).map(d=>({id:d.id,versions:d.versions.map(v=>({id:v.version_id,percentage:v.percentage}))}));
@@ -20,8 +22,9 @@ try{
  const scripts=await api("workers",prefix+"/workers/scripts");const tag=(Array.isArray(scripts)?scripts:[]).find(s=>s.id==="execution-guard")?.tag;
  if(tag&&/^[a-f0-9-]{32,36}$/.test(tag)){
    const tr=await api("build_triggers",prefix+"/builds/workers/"+tag+"/triggers",manage);
-   out.triggers=(Array.isArray(tr)?tr:[]).map(t=>({id:t.trigger_uuid,includes:t.branch_includes,excludes:t.branch_excludes,deploy_command_known:["npx wrangler deploy","npx wrangler preview","npx wrangler preview --ignore-base-config"].includes(t.deploy_command)?t.deploy_command:"other"}));
+   out.triggers=(Array.isArray(tr)?tr:[]).map(t=>({id:t.trigger_uuid,includes:t.branch_includes,excludes:t.branch_excludes,deploy_command_known:["npx wrangler versions upload","npx wrangler deploy","npx wrangler preview","npx wrangler preview --ignore-base-config"].includes(t.deploy_command)?t.deploy_command:"other"}));
  }
+ check("controlled_production_trigger",out.triggers?.some(t=>t.id==="9ee2b6ad-e77b-48ce-833c-5bbcd9f4af83"&&JSON.stringify(t.includes)===JSON.stringify(["main"])&&t.deploy_command_known==="npx wrangler versions upload"));
  const logs=await api("build_logs_management",prefix+"/builds/builds/c6cf387b-24fa-4f68-ad99-6f43bb9195ca/logs",manage);
  if(logs){const raw=JSON.stringify(logs);out.build_log_indicators={received:true,quota:/quota|limit exceeded|too many/i.test(raw),auth:/authentication|permission|not authorized/i.test(raw),missing_previews:/missing a.*previews/i.test(raw),error_marker:/\[ERROR\]/.test(raw)};}
  const health=await get(prod,"/health");out.production_health={http:health.http,version:health.body?.version,db:health.body?.database,oauth:health.body?.oauth?.discovery};

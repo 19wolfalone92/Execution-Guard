@@ -1,4 +1,5 @@
 import {remoteRecovery} from "./remote-recovery.mjs";
+import {projectedRows,typedProjection} from "./backup-evidence.mjs";
 import assert from "node:assert/strict";
 import {readFileSync,writeFileSync} from "node:fs";
 import {spawnSync} from "node:child_process";
@@ -17,6 +18,40 @@ const config=JSON.parse(readFileSync("wrangler.jsonc","utf8"));
 let before;
 const proof="eg-qualification-browser-a34bbee1-4df0-4938-9f42-7c8751e44f50-p",project=proof.slice(0,-2),workflow="15992bad-d1dd-4b48-98cb-5b57c6ec635b",owner="336868992";
 const digest=x=>createHash("sha256").update(JSON.stringify(x)).digest("hex");
+async function previewD1Capabilities(){
+ const id="657131f8-b0f4-47f3-ab3d-91840843f2db";
+ const path="/d1/database/"+id;
+ const identity=await cf(path);
+ check("preview_d1_api_identity",identity.ok&&(identity.result?.uuid||identity.result?.id)===id&&identity.result?.name==="execution-guard-preview-db");
+ async function probe(sql,verify){
+  try{
+   const r=await get("https://api.cloudflare.com/client/v4","/accounts/"+account+path+"/query",{
+    method:"POST",headers:{Authorization:"Bearer "+read,"Content-Type":"application/json"},body:JSON.stringify({sql})
+   });
+   const result=r.body?.result?.[0];
+   const errors=[...(r.body?.errors||[]),...(result?.errors||[])];
+   return {http:r.http,api_success:r.body?.success===true&&result?.success===true,error_codes:errors.map(x=>x.code).filter(Number.isInteger),
+    missing_function:errors.some(x=>/no such function|unknown function/i.test(x.message||"")),
+    verified:r.http===200&&r.body?.success===true&&result?.success===true&&verify(result.results)};
+  }catch{return {verified:false};}
+ }
+ const blobHex=Buffer.from(Array.from({length:256},(_,i)=>i)).toString("hex").toUpperCase();
+ const typedSql="WITH fixture(n,v) AS (VALUES (1,CAST(X'610062' AS TEXT)),(2,CAST(X'80FF' AS TEXT)),(3,''),"+
+  "(4,CAST(X'C3A9' AS TEXT)),(5,CAST(X'65CC81' AS TEXT)),(6,X'"+blobHex+"'),(7,X''),"+
+  "(8,-9223372036854775808),(9,9223372036854775807),(10,NULL)) SELECT "+typedProjection(["v"])+" FROM fixture ORDER BY n";
+ const [typed,encoding,signedZero,subnormal,nativeInt]=await Promise.all([
+  probe(typedSql,rows=>JSON.stringify(projectedRows(["v"],rows))===JSON.stringify([
+   [["text","610062"]],[["text","80FF"]],[["text",""]],[["text","C3A9"]],[["text","65CC81"]],
+   [["blob",blobHex]],[["blob",""]],[["integer","-9223372036854775808"]],
+   [["integer","9223372036854775807"]],[["null",null]]
+  ])),
+  probe("PRAGMA encoding",rows=>rows.length===1&&rows[0].encoding==="UTF-8"),
+  probe("SELECT hex(ieee754_to_blob(-0.0)) AS signed_zero",rows=>rows[0]?.signed_zero==="8000000000000000"),
+  probe("SELECT hex(ieee754_to_blob(ieee754_from_blob(X'0000000000000001'))) AS subnormal",rows=>rows[0]?.subnormal==="0000000000000001"),
+  probe("SELECT 9223372036854775807 AS i",rows=>String(rows[0]?.i)==="9223372036854775807"),
+ ]);
+ return {target:id,typed_projection:typed,encoding,ieee754_to_blob:signedZero,ieee754_round_trip:subnormal,native_int64:nativeInt};
+}
 async function snapshot(){
  const queries=[
  ["checkpoint","SELECT revision,value,updated_at FROM eg_checkpoints WHERE owner=? AND project IN (?,?) ORDER BY project",[owner,proof,"eg-qualification-"+workflow]],
@@ -36,6 +71,7 @@ try{
  check("account_and_credentials",account==="04b45c9393f4e12159c6b8118ec54791"&&!!management&&!!read&&tick?.length>=32);
  check("isolated_config",config.name==="execution-guard"&&config.previews.vars.EG_ENVIRONMENT==="preview"&&config.previews.vars.EG_AUTH_ENABLED==="true"&&config.previews.vars.EG_PREVIEW_READY==="true"&&config.previews.d1_databases.length===1&&config.previews.kv_namespaces.length===1&&config.previews.d1_databases[0].database_id==="657131f8-b0f4-47f3-ab3d-91840843f2db"&&config.previews.kv_namespaces[0].id==="25a30c61f53b422fa11889babb147fd4"&&config.d1_databases.every(d=>d.database_id!==config.previews.d1_databases[0].database_id)&&config.kv_namespaces.every(k=>k.id!==config.previews.kv_namespaces[0].id));
  before=await prod();out.production_before=before;
+ out.d1_capabilities=await previewD1Capabilities();
  out.memory_before=await snapshot();
  // Wait for the automatic build to settle so it cannot overwrite the tagged direct deployment.
  let build;

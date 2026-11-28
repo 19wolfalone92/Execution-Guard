@@ -2,7 +2,6 @@ name: Preview OAuth and backup preflight
 on:
   push:
     branches: [audit/oauth-e2e-20261125]
-    paths: ['qualification/release-preflight.mjs', '.github/workflows/release-preflight.yml']
 permissions:
   contents: read
 jobs:
