@@ -1,0 +1,53 @@
+name: OAuth and MCP runtime qualification
+on:
+  push:
+    branches:
+      - audit/oauth-e2e-20261125
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install exact production and runtime testing dependency graph
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Report dependency audit details
+        run: |
+          npm audit --json > npm-audit.json || true
+          node --input-type=module -e 'import fs from "node:fs"; const a=JSON.parse(fs.readFileSync("npm-audit.json","utf8")); const v=a.vulnerabilities||{}; console.log(JSON.stringify({counts:a.metadata?.vulnerabilities||{},findings:Object.entries(v).map(([name,x])=>({name,severity:x.severity,isDirect:x.isDirect,range:x.range,via:x.via,fixAvailable:x.fixAvailable}))},null,2));'
+          npm audit --audit-level=high
+          npm audit --omit=dev --audit-level=high
+      - name: Bundle exactly as a Workers deployment (no deploy)
+        run: npx wrangler deploy --dry-run --outdir .oauth-build
+      - name: Exercise OAuth and protected MCP flow using workerd
+        run: node qualification/oauth-runtime.mjs
+      - name: Exercise isolated Preview issuer and secret-gated tick in workerd
+        run: EG_TEST_PREVIEW=1 node qualification/oauth-runtime.mjs
+      - name: Qualify upgrade and rollback with real baseline and candidate Worker bundles
+        run: |
+          mkdir -p .eg-baseline
+          git archive a61f1061b91dbabce2bb3ccf66ba710589b21808 | tar -x -C .eg-baseline
+          ln -s ../node_modules .eg-baseline/node_modules
+          (cd .eg-baseline && ../node_modules/.bin/wrangler deploy --dry-run --outdir .bundle)
+          EG_BASELINE_BUNDLE="$(find .eg-baseline/.bundle -maxdepth 1 -type f -name '*.js' -print -quit)" node qualification/oauth-runtime.mjs
+      - name: Verify production endpoints (failure is fatal)
+        run: node qualification/live-smoke.mjs
+      - name: Upload generated lockfile and audit report for review
+        uses: actions/upload-artifact@v7
+        with:
+          name: oauth-dependency-qualification
+          path: |
+            package-lock.json
+            npm-audit.json
+          if-no-files-found: error

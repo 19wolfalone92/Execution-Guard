@@ -1,10 +1,15 @@
+import { recoveryQualification } from "./recovery-qualification.mjs";
+import { githubReadFetcher } from "./github-read.mjs";
+import { timingSafeEqual, createHash } from "node:crypto";
 import { OAuthProvider, AuthorizationError, CimdFetchError, getOAuthApi } from "@cloudflare/workers-oauth-provider";
 import publicWorker from "./worker.mjs";
-import { HOST, RESOURCE, READ, WRITE, CLIENT, consentHtml, s256, gatewayRoute, configured } from "./security.mjs";
+import { HOST, RESOURCE, PREVIEW_HOST, authHost, READ, WRITE, CLIENT, consentHtml, s256, gatewayRoute, configured, previewStorageReady } from "./security.mjs";
 import { privateFetch } from "./private.mjs";
 import { runBatch } from "./tasks.mjs";
+import { githubRepositoryStatus, executionFinalize } from "./orchestrator.mjs";
+import { browserClientApproved, provisionBrowserClient, browserQualificationRoute } from "./preview-browser.mjs";
 
-const callbackUrl=HOST+"/callback";
+const callbackUrl=env=>authHost(env)+"/callback";
 const chatgptRedirect="https://chatgpt.com/connector_platform_oauth_redirect";
 const registeredKey="eg:chatgpt:registered-client:v1";
 // Public-client ID only. No credentials are stored here or returned to the browser.
@@ -12,7 +17,7 @@ async function registeredId(env) {
   return await env.OAUTH_KV.get(registeredKey);
 }
 async function approvedClient(env,id) {
-  return id===CLIENT || (typeof id==="string" && id.length>0 && id===await registeredId(env));
+  return id===CLIENT || (typeof id==="string" && id.length>0 && (id===await registeredId(env)||await browserClientApproved(env,id)));
 }
 // Provision once from the trusted scheduled handler, never from a public request.
 async function provisionRegisteredClient(env,oauth) {
@@ -50,7 +55,7 @@ const knownGithubErrors=new Set(["incorrect_client_credentials","redirect_uri_mi
 async function exchangeGithubCode(env,code,verifier,fetcher=fetch) {
   if(typeof verifier!=="string"||!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier))return {error:"invalid_saved_verifier"};
   if(typeof env.GITHUB_CLIENT_ID!=="string"||!env.GITHUB_CLIENT_ID.trim()||typeof env.GITHUB_CLIENT_SECRET!=="string"||!env.GITHUB_CLIENT_SECRET.trim())return {error:"missing_client_configuration"};
-  const body=new URLSearchParams({client_id:env.GITHUB_CLIENT_ID.trim(),client_secret:env.GITHUB_CLIENT_SECRET.trim(),code,code_verifier:verifier,redirect_uri:callbackUrl});
+  const body=new URLSearchParams({client_id:env.GITHUB_CLIENT_ID.trim(),client_secret:env.GITHUB_CLIENT_SECRET.trim(),code,code_verifier:verifier,redirect_uri:callbackUrl(env)});
   let response;
   try {
     response=await fetcher(githubTokenEndpoint,{method:"POST",redirect:"manual",headers:{Accept:"application/json","Content-Type":"application/x-www-form-urlencoded","User-Agent":"Execution-Guard"},body:body.toString(),signal:AbortSignal.timeout(15000)});
@@ -114,7 +119,7 @@ const defaultHandler={async fetch(request,env) {
       stage="begin_github_sign_in";
       const {state,headers}=await oauth.beginUpstream(approved.request,{data:{verifier},headers:approved.headers});
       const url=new URL("https://github.com/login/oauth/authorize");
-      for(const [key,value] of Object.entries({client_id:env.GITHUB_CLIENT_ID,redirect_uri:callbackUrl,scope:"read:user",state,code_challenge:await s256(verifier),code_challenge_method:"S256"}))url.searchParams.set(key,value);
+      for(const [key,value] of Object.entries({client_id:env.GITHUB_CLIENT_ID,redirect_uri:callbackUrl(env),scope:"read:user",state,code_challenge:await s256(verifier),code_challenge_method:"S256"}))url.searchParams.set(key,value);
       headers.set("Location",url.toString());
       // Explicitly turn the consent POST into a top-level GET at GitHub.
       return new Response(null,{status:303,headers});
@@ -161,20 +166,65 @@ const defaultHandler={async fetch(request,env) {
 }};
 const providerOptions={apiRoute:"/mcp-private",apiHandler:{fetch:privateFetch},defaultHandler,authorizeEndpoint:"/authorize",tokenEndpoint:"/oauth/token",scopesSupported:[READ,WRITE],requiredScopes:[READ],resourceMetadata:{resource:RESOURCE,authorization_servers:[HOST]},clientIdMetadataDocumentEnabled:true};
 const provider=new OAuthProvider(providerOptions);
+const previewOptions={...providerOptions,resourceMetadata:{resource:PREVIEW_HOST+"/mcp-private",authorization_servers:[PREVIEW_HOST]}};
+const previewProvider=new OAuthProvider(previewOptions);
 const gateway=gatewayRoute(publicWorker,provider);
+const previewGateway=gatewayRoute(publicWorker,previewProvider);
 export default {...gateway,async fetch(request,env,ctx){
   const url=new URL(request.url);
-  if(url.pathname==="/oauth/client-info"){
-    if(url.origin!==HOST)return new Response("Unknown host",{status:404});
+  if(url.pathname.startsWith("/qualification/oauth"))return browserQualificationRoute(request,env);
+  if(url.pathname==="/qualification/version"){
+    const immutable=/^https:\/\/[a-f0-9]{8}-execution-guard\.19wolf-alone92\.workers\.dev$/.test(url.origin);
+    if(env.EG_ENVIRONMENT!=="preview"||!(url.origin===PREVIEW_HOST||immutable))return new Response("Not found",{status:404});
     if(request.method!=="GET")return new Response(null,{status:405});
-    if(!configured(env))return new Response("Private access not configured",{status:503});
+    const m=env.CF_VERSION_METADATA;
+    return Response.json({sha:/^[a-f0-9]{40}$/.test(env.EG_RELEASE_SHA||"")?env.EG_RELEASE_SHA:null,version_id:m?.id||null,tag:m?.tag||null,timestamp:m?.timestamp||null},{headers:{"Cache-Control":"no-store"}});
+  }
+  // Previews have no platform Cron. A bounded test-only tick is guarded by
+  // exact stable preview origin, explicit environment opt-in and a separate secret.
+  if(url.pathname==="/qualification/tick"){
+    if(env.EG_ENVIRONMENT!=="preview"||url.origin!==PREVIEW_HOST||!configured(env))return new Response("Not found",{status:404});
+    if(request.method!=="POST")return new Response(null,{status:405});
+    const secret=env.EG_PREVIEW_TICK_SECRET,provided=request.headers.get("Authorization")||"";
+    if(typeof secret!=="string"||secret.length<32||provided.length>512||!timingSafeEqual(createHash("sha256").update(provided).digest(),createHash("sha256").update("Bearer "+secret).digest()))return new Response("Forbidden",{status:403});
+    if(!await previewStorageReady(env))return new Response("Preview storage not qualified",{status:503});
+    if(url.searchParams.get("diagnostic")==="prior-proof"){
+      if(env.EG_PREVIEW_BROWSER_QUALIFICATION!=="true")return new Response("Not found",{status:404});
+      const result=await executionFinalize(env.DB,env.EG_OWNER_GITHUB_ID,{project:"eg-qualification-browser-a34bbee1-4df0-4938-9f42-7c8751e44f50",workflow_id:"15992bad-d1dd-4b48-98cb-5b57c6ec635b"});
+      return Response.json({environment:"preview",current_sha:env.EG_RELEASE_SHA,prior_sha:"517d31587779cd648d0f00eba01265d50914ff8d",verified:result.verified===true,steps:result.steps,verified_steps:result.verified_steps},{headers:{"Cache-Control":"no-store"}});
+    }
+    if(url.searchParams.get("diagnostic")==="recovery"){
+      if(env.EG_PREVIEW_BROWSER_QUALIFICATION!=="true")return new Response("Not found",{status:404});
+      try{return Response.json(await recoveryQualification(env.DB,url.searchParams),{headers:{"Cache-Control":"no-store"}});}
+      catch{return Response.json({status:"FAIL",reason:"fixture_execution_failed"},{status:500,headers:{"Cache-Control":"no-store"}});}
+    }
+    if(url.searchParams.get("diagnostic")==="github"){
+      const trace={};
+      const traced=async (target,options)=>{
+        try{const r=await fetch(target,options);trace.http=r.status;trace.rate_limit_exhausted=r.headers.get("X-RateLimit-Remaining")==="0";trace.retry_after_present=r.headers.has("Retry-After");return r;}
+        catch(e){trace.transport=e?.name==="TimeoutError"?"timeout":e?.name==="TypeError"?"type_error":"network_error";throw e;}
+      };
+      const target={owner:"19wolfalone92",repo:"Execution-Guard"};
+      const result=await githubRepositoryStatus(target,githubReadFetcher(env,traced));
+      return Response.json({environment:"preview",probe:"github_repository_status",credential_configured:!!env.EG_GITHUB_READ_TOKEN,verified:result.verified===true,error:typeof result.error==="string"&&/^[a-z0-9_]{1,80}$/.test(result.error)?result.error:null,retryable:result.retryable===true,trace},{headers:{"Cache-Control":"no-store"}});
+    }
+    const api=getOAuthApi(previewOptions,env);
+    await provisionRegisteredClient(env,api);
+    await provisionBrowserClient(env,api);
+    await runBatch(env.DB,env.EG_OWNER_GITHUB_ID,4,githubReadFetcher(env));
+    return Response.json({status:"tick_completed",environment:"preview"},{headers:{"Cache-Control":"no-store"}});
+  }
+  if(url.pathname==="/oauth/client-info"){
+    if(url.origin!==authHost(env))return new Response("Unknown host",{status:404});
+    if(request.method!=="GET")return new Response(null,{status:405});
+    if(!configured(env)||(env.EG_ENVIRONMENT==="preview"&&!await previewStorageReady(env)))return new Response("Private access not configured",{status:503});
     const id=await registeredId(env);
     return new Response(JSON.stringify(id?{status:"ready",client_id:id,redirect_uri:chatgptRedirect,token_endpoint_auth_method:"none"}:{status:"pending"}),{status:id?200:503,headers:{"Content-Type":"application/json","Cache-Control":"no-store"}});
   }
-  return gateway.fetch(request,env,ctx);
+  return (env.EG_ENVIRONMENT==="preview"?previewGateway:gateway).fetch(request,env,ctx);
 },async scheduled(_event,env,ctx){
-  if(configured(env)){
-    ctx.waitUntil(runBatch(env.DB,env.EG_OWNER_GITHUB_ID));
+  if(env.EG_ENVIRONMENT!=="preview"&&configured(env)){
+    ctx.waitUntil(runBatch(env.DB,env.EG_OWNER_GITHUB_ID,4,githubReadFetcher(env)));
     ctx.waitUntil((async()=>{try{await provisionRegisteredClient(env,getOAuthApi(providerOptions,env));}catch{console.warn("oauth_registered_client_provision_failed");}})());
   }
 }};

@@ -1,0 +1,27 @@
+name: Cloudflare read-only account diagnostics
+on:
+  push:
+    branches: [audit/oauth-e2e-20261125]
+    paths: ['qualification/cloudflare-readonly.mjs', '.github/workflows/cloudflare-readonly.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cloudflare:
+    if: github.repository == '19wolfalone92/Execution-Guard' && github.ref == 'refs/heads/audit/oauth-e2e-20261125'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - run: npm ci --ignore-scripts
+      - run: node --check qualification/cloudflare-readonly.mjs
+      - name: Read only fixed Cloudflare resources and report allowlisted metadata
+        run: node qualification/cloudflare-readonly.mjs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

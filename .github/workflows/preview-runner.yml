@@ -1,0 +1,25 @@
+name: Preview remote scheduler qualification
+on:
+  workflow_dispatch:
+  push:
+    branches: [audit/oauth-e2e-20261125]
+    paths: ['qualification/preview-runner.mjs', '.github/workflows/preview-runner.yml']
+permissions:
+  contents: read
+jobs:
+  runner:
+    if: github.repository == '19wolfalone92/Execution-Guard' && github.ref == 'refs/heads/audit/oauth-e2e-20261125'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - run: node qualification/preview-runner.mjs
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          EG_PREVIEW_TICK_SECRET: ${{ secrets.EG_PREVIEW_TICK_SECRET }}

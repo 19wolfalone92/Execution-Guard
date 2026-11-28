@@ -1,0 +1,33 @@
+name: Configure isolated Preview once
+on:
+  push:
+    branches: [audit/oauth-e2e-20261125]
+    paths: ['.github/workflows/preview-configure.yml', 'qualification/preview-configure.mjs']
+permissions:
+  contents: read
+concurrency:
+  group: eg-preview-configure
+  cancel-in-progress: false
+jobs:
+  configure:
+    if: github.repository == '19wolfalone92/Execution-Guard' && github.ref == 'refs/heads/audit/oauth-e2e-20261125'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - run: npm ci
+      - run: node --check qualification/preview-configure.mjs
+      - name: Apply only isolated Preview credentials and verify target
+        run: node qualification/preview-configure.mjs
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_MANAGEMENT_TOKEN: ${{ secrets.CLOUDFLARE_MANAGEMENT_TOKEN }}
+          EG_PREVIEW_GITHUB_CLIENT_ID: ${{ secrets.EG_PREVIEW_GITHUB_CLIENT_ID }}
+          EG_PREVIEW_GITHUB_CLIENT_SECRET: ${{ secrets.EG_PREVIEW_GITHUB_CLIENT_SECRET }}
+          EG_PREVIEW_TICK_SECRET: ${{ secrets.EG_PREVIEW_TICK_SECRET }}
