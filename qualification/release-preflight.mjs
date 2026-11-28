@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import {createHash,randomBytes} from "node:crypto";
+import {deploymentMetadata} from "./backup-evidence.mjs";
 const host="https://audit-oauth-e2e-20261125-execution-guard.19wolf-alone92.workers.dev",prod="https://execution-guard.19wolf-alone92.workers.dev";
 const account=process.env.CLOUDFLARE_ACCOUNT_ID,read=process.env.CLOUDFLARE_API_TOKEN,manage=process.env.CLOUDFLARE_MANAGEMENT_TOKEN,tick=process.env.EG_PREVIEW_TICK_SECRET;
-const out={sha:process.env.GITHUB_SHA,checked_at:new Date().toISOString(),checks:{},api:{}};
+// The probes below inspect OAuth and resource state. They cannot authenticate an
+// independently retrieved backup/restore artifact or qualify its source snapshot.
+const out={sha:process.env.GITHUB_SHA,checked_at:new Date().toISOString(),status:"BLOCKED",blockers:["independently_verified_backup_restore_required"],checks:{},api:{}};
 const check=(n,b)=>{out.checks[n]=Boolean(b);};
 const req=(base,path,options={})=>fetch(base+path,{...options,redirect:"manual",signal:AbortSignal.timeout(20000)});
 const get=async(base,path,options={})=>{const r=await req(base,path,options);return {http:r.status,body:await r.json().catch(()=>null)};};
@@ -12,6 +15,7 @@ try{
  assert.equal(account,"04b45c9393f4e12159c6b8118ec54791");assert.equal(process.env.GITHUB_REF,"refs/heads/audit/oauth-e2e-20261125");assert.ok(read&&manage&&tick?.length>=32);
  const before=await api("production_deployments",prefix+"/workers/scripts/execution-guard/deployments");
  out.production=(before?.deployments||[]).slice(0,1).map(d=>({id:d.id,versions:d.versions.map(v=>({id:v.version_id,percentage:v.percentage}))}));
+ check("production_deployment_verified",deploymentMetadata(out.production));
  const bookmark=await api("production_bookmark",prefix+"/d1/database/e7699170-b634-48ce-a3b0-733aedb9b898/time_travel/bookmark");out.bookmark=typeof bookmark?.bookmark==="string"&&/^[a-f0-9-]+$/i.test(bookmark.bookmark)?bookmark.bookmark:null;
  const scripts=await api("workers",prefix+"/workers/scripts");const tag=(Array.isArray(scripts)?scripts:[]).find(s=>s.id==="execution-guard")?.tag;
  if(tag&&/^[a-f0-9-]{32,36}$/.test(tag)){
@@ -43,6 +47,9 @@ try{
  const cb=await req(host,"/callback?state=invalid&code=invalid");check("invalid_callback_rejected",cb.status>=400);
  const token=await get(host,"/oauth/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"refresh_token",client_id:client.body?.client_id||"unavailable",refresh_token:"invalid-test-token",resource})});check("invalid_refresh_rejected",token.http>=400);
  const mcp=await req(host,"/mcp-private",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"})});check("unauthorized_mcp",mcp.status===401);
- const after=await api("production_after",prefix+"/workers/scripts/execution-guard/deployments");check("production_unchanged",JSON.stringify(out.production)===JSON.stringify((after?.deployments||[]).slice(0,1).map(d=>({id:d.id,versions:d.versions.map(v=>({id:v.version_id,percentage:v.percentage}))}))));
+ const after=await api("production_after",prefix+"/workers/scripts/execution-guard/deployments");
+ const deployments=(after?.deployments||[]).slice(0,1).map(d=>({id:d.id,versions:d.versions.map(v=>({id:v.version_id,percentage:v.percentage}))}));
+ check("production_unchanged",deploymentMetadata(out.production)&&deploymentMetadata(deployments)&&JSON.stringify(out.production)===JSON.stringify(deployments));
 }catch(e){out.failure=e?.name==="AssertionError"?"assertion_failed":"request_failed";}
-console.log("EG_RELEASE_PREFLIGHT "+JSON.stringify(out));if(out.failure||!Object.values(out.checks).every(Boolean)||!out.checks.registered_client||!out.bookmark)process.exitCode=1;
+console.log("EG_RELEASE_PREFLIGHT "+JSON.stringify(out));
+process.exitCode=1;
